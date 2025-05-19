@@ -1,20 +1,20 @@
 # IPC Benchmark
 
-A performance comparison of different Inter-Process Communication (IPC) mechanisms with io_uring integration.
+A performance comparison of different Inter-Process Communication (IPC) mechanisms.
 
 ## Overview
 
 This benchmark compares three different IPC approaches:
 
-1. **Unix Domain Socket with io_uring**
-   - Direct integration with io_uring's IORING_OP_SEND/RECV
+1. **Unix Domain Socket**
+   - Non-blocking I/O with select()
    - Kernel-managed buffering and synchronization
+   - Efficient local communication
 
-2. **Shared Memory with pthread_mutex and io_uring**
+2. **Shared Memory with pthread_mutex**
    - Shared memory region with a ring buffer
    - pthread_mutex and condition variables for synchronization 
-   - Dedicated thread waiting on mutex, signaling eventfd
-   - io_uring integration via eventfd
+   - Dedicated thread waiting on mutex, signaling via pipe/eventfd
 
 3. **Linux-optimized Lock-free Shared Memory with futex**
    - Lock-free ring buffer implementation
@@ -97,16 +97,16 @@ Message sizes vary from 2-4KiB typical, up to a maximum of 128KiB.
 
 ## Implementation Design
 
-### 1. Unix Domain Socket with io_uring
+### 1. Unix Domain Socket
 
 ```
 Client Process                     Server Process
 +----------------+                +----------------+
-| io_uring Event |                | io_uring Event |
+| select() Event |                | select() Event |
 | Loop           |                | Loop           |
 |                |                |                |
-| - IORING_OP_   |<--UDS Pipe---->| - IORING_OP_   |
-|   SEND/RECV    |                |   SEND/RECV    |
+| - Non-blocking |<--UDS Pipe---->| - Non-blocking |
+|   send/recv    |                |   send/recv    |
 +----------------+                +----------------+
 ```
 
@@ -115,11 +115,11 @@ Client Process                     Server Process
 ```
 Client Process                           Server Process
 +----------------+                      +----------------+
-| io_uring Event |                      | io_uring Event |
+| select() Event |                      | select() Event |
 | Loop           |                      | Loop           |
 |                |                      |                |
-| - IORING_OP_   |<---eventfd events--->| - IORING_OP_   |
-|   READ(eventfd)|                      |   READ(eventfd)|
+| - READ from    |<---pipe/eventfd----->| - READ from    |
+|   notif pipe   |       events         |   notif pipe   |
 +----------------+                      +----------------+
         ^                                      ^
         |                                      |
@@ -146,22 +146,22 @@ Client Process                           Server Process
         ^                                      ^
         |                                      |
 +----------------+                      +----------------+
-| memfd shared   |<----Lock-free-------->| memfd shared   |
+| memfd shared   |<----Lock-free------->| memfd shared   |
 | memory region  |     Ring Buffer      | memory region  |
 +----------------+                      +----------------+
 ```
 
 ## System Requirements
 
-- Linux kernel 5.1+ (for io_uring support)
-- liburing development package
-- pthread and rt libraries
+- Unix-based OS (Linux, macOS, etc.)
+- pthread library
+- rt library (Linux only)
 
 ## Purpose
 
-This benchmark demonstrates the performance trade-offs when using different IPC mechanisms, particularly focusing on the overhead introduced by integrating them with an io_uring based event loop.
+This benchmark demonstrates the performance trade-offs when using different IPC mechanisms, comparing traditional Unix Domain Sockets with shared memory approaches.
 
-The shared memory implementation specifically shows how a traditional mutex-based approach with a dedicated thread affects performance compared to direct socket I/O with io_uring, helping developers make informed decisions about their IPC strategy.
+The shared memory implementation specifically shows how a traditional mutex-based approach with a dedicated thread affects performance compared to direct socket I/O, helping developers make informed decisions about their IPC strategy.
 
 ## License
 

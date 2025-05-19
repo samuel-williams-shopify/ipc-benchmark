@@ -1,7 +1,16 @@
 # Compiler and flags
 CC := gcc
 CFLAGS := -Wall -O2
-LDFLAGS := -luring -lpthread -lrt
+
+# Detect operating system
+UNAME_S := $(shell uname -s)
+
+# Platform-specific settings
+ifeq ($(UNAME_S),Linux)
+    LDFLAGS := -lpthread -lrt
+else
+    LDFLAGS := -lpthread
+endif
 
 # Target executable
 TARGET := ipc_benchmark
@@ -25,30 +34,40 @@ $(TARGET): $(OBJ)
 clean:
 	rm -f $(OBJ) $(TARGET)
 
+# Helper function to run a benchmark safely
+define run_benchmark
+	@trap 'kill $$SERVER_PID 2>/dev/null || true' EXIT; \
+	./$(TARGET) --server --mode $(1) & \
+	SERVER_PID=$$!; \
+	echo "Server PID: $$SERVER_PID"; \
+	sleep 2; \
+	./$(TARGET) --client --mode $(1); \
+	kill $$SERVER_PID 2>/dev/null || true; \
+	wait $$SERVER_PID 2>/dev/null || true
+endef
+
 # Run the benchmarks
 run-uds:
-	./$(TARGET) --server --mode uds & \
-	SERVER_PID=$$!; \
-	sleep 1; \
-	./$(TARGET) --client --mode uds; \
-	kill $$SERVER_PID
+	$(call run_benchmark,uds)
 
 run-shm:
-	./$(TARGET) --server --mode shm & \
-	SERVER_PID=$$!; \
-	sleep 1; \
-	./$(TARGET) --client --mode shm; \
-	kill $$SERVER_PID
+	$(call run_benchmark,shm)
 
+# Lock-free shared memory benchmark - Linux only
 run-lfshm:
-	./$(TARGET) --server --mode lfshm & \
-	SERVER_PID=$$!; \
-	sleep 1; \
-	./$(TARGET) --client --mode lfshm; \
-	kill $$SERVER_PID
+ifeq ($(UNAME_S),Linux)
+	$(call run_benchmark,lfshm)
+else
+	@echo "Lock-free shared memory mode is only supported on Linux"
+endif
 
 # Run all benchmarks
-run-all: run-uds run-shm run-lfshm
+run-all:
+ifeq ($(UNAME_S),Linux)
+	$(MAKE) run-uds run-shm run-lfshm
+else
+	$(MAKE) run-uds run-shm
+endif
 
 # Show help
 help:
@@ -57,7 +76,9 @@ help:
 	@echo "  clean     - Remove compiled files"
 	@echo "  run-uds   - Run Unix Domain Socket benchmark"
 	@echo "  run-shm   - Run Shared Memory with pthread_mutex benchmark"
-	@echo "  run-lfshm - Run Lock-free Shared Memory benchmark" 
+ifeq ($(UNAME_S),Linux)
+	@echo "  run-lfshm - Run Lock-free Shared Memory benchmark (Linux only)"
+endif
 	@echo "  run-all   - Run all benchmarks sequentially"
 
 .PHONY: all clean run-uds run-shm run-lfshm run-all help

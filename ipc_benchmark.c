@@ -1,13 +1,13 @@
 /**
- * ipc_benchmark.c - Performance comparison between different IPC mechanisms using io_uring
+ * ipc_benchmark.c - Performance comparison between different IPC mechanisms
  * 
  * This benchmark compares:
- * 1. Unix Domain Socket with io_uring
- * 2. Shared Memory with pthread_mutex, dedicated thread and io_uring
+ * 1. Unix Domain Socket with select()
+ * 2. Shared Memory with pthread_mutex and dedicated thread
  * 3. Linux-optimized implementation with futex and lock-free ring buffer
  * 
  * Compile with:
- * gcc -o ipc_benchmark ipc_benchmark.c -luring -lpthread -lrt -Wall -O2
+ * gcc -o ipc_benchmark ipc_benchmark.c -lpthread -lrt -Wall -O2
  */
 
 #define _GNU_SOURCE
@@ -22,28 +22,25 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/select.h>
 #include <sys/resource.h>
-#include <sys/eventfd.h>
 #include <time.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <liburing.h>
-#include <sys/syscall.h>
+
+#ifdef __linux__
 #include <linux/futex.h>
+#include <sys/syscall.h>
+#include <sys/eventfd.h>
+#define HAVE_FUTEX 1
+#define HAVE_EVENTFD 1
+#endif
 
 /* For compatibility with older headers */
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
-#endif
-
-#ifndef FUTEX_WAIT
-#define FUTEX_WAIT 0
-#endif
-
-#ifndef FUTEX_WAKE
-#define FUTEX_WAKE 1
 #endif
 
 /* Configuration constants */
@@ -51,20 +48,21 @@
 #define SHM_NAME "/ipc_benchmark_shm"
 #define MAX_MSG_SIZE (128 * 1024)  // 128KiB max message size
 #define BUFFER_SIZE (4 * 1024 * 1024)  // 4MiB ring buffer
-#define QUEUE_DEPTH 32  // io_uring queue depth
 #define WARMUP_DURATION 1  // Warmup duration in seconds
 #define RUN_DURATION 10     // Benchmark duration in seconds
 #define MAX_LATENCIES 1000000  // Maximum number of latency measurements
 
-/* Messaging structures */
-typedef struct {
-    uint32_t size;       // Message size
-    uint32_t seq;        // Sequence number
-    uint64_t timestamp;  // For latency calculation
-    char data[0];        // Flexible array member for message payload
-} Message;
+#define MAGIC_START 0xDEADBEEF
+#define MAGIC_END   0xCAFEBABE
 
-/* Statistics structures */
+/* Forward declarations of structures */
+typedef struct RingBuffer RingBuffer;
+typedef struct ThreadData ThreadData;
+#ifdef HAVE_FUTEX
+typedef struct LockFreeRingBuffer LockFreeRingBuffer;
+#endif
+
+/* Statistics structure */
 typedef struct {
     uint64_t ops;            // Operations completed
     uint64_t bytes;          // Bytes transferred
@@ -75,8 +73,19 @@ typedef struct {
     double p99_latency_us;   // 99th percentile latency
 } BenchmarkStats;
 
-/* Shared memory ring buffer structure */
+/* Message structure */
 typedef struct {
+    uint32_t magic_start;  // Magic number to detect corruption
+    uint32_t size;        // Message size
+    uint32_t seq;         // Sequence number
+    uint64_t timestamp;   // For latency calculation
+    uint32_t checksum;    // Message checksum
+    char data[0];         // Flexible array member for message payload
+    // magic_end is written after data
+} Message;
+
+/* Shared memory ring buffer structure */
+struct RingBuffer {
     pthread_mutex_t mutex;
     pthread_cond_t server_cond;
     pthread_cond_t client_cond;
@@ -85,47 +94,80 @@ typedef struct {
     size_t size;
     bool message_available;
     bool response_available;
+    volatile bool ready;
+    // Add timing metrics
+    uint64_t mutex_lock_time;    // Time spent in mutex locks
+    uint64_t cond_wait_time;     // Time spent waiting on condition variables
+    uint64_t notify_time;        // Time spent in notification handling
+    uint64_t copy_time;          // Time spent copying messages
+    uint64_t total_ops;          // Total number of operations
     char buffer[0];  // Flexible array member for actual data
-} RingBuffer;
+};
 
-/* Thread data structure for shared memory notification thread */
-typedef struct {
+/* Thread data structure */
+struct ThreadData {
     RingBuffer* rb;
-    int eventfd;
+    int notif_fd;  // notification pipe/eventfd
     bool is_server;
     volatile bool should_exit;
-} ThreadData;
+};
 
-/* Lock-free ring buffer for Linux-optimized mode */
-typedef struct {
+#ifdef HAVE_FUTEX
+/* Lock-free ring buffer structure */
+struct LockFreeRingBuffer {
     atomic_size_t read_pos;
     atomic_size_t write_pos;
     size_t size;
     uint32_t server_futex; // For servers to wait on
     uint32_t client_futex; // For clients to wait on
     char buffer[0];
-} LockFreeRingBuffer;
+};
+
+/* Futex functions */
+static inline long futex(uint32_t* uaddr, int futex_op, uint32_t val) {
+    return syscall(SYS_futex, uaddr, futex_op, val, NULL, NULL, 0);
+}
+
+void futex_wait(uint32_t* uaddr, uint32_t val) {
+    futex(uaddr, FUTEX_WAIT, val);
+}
+
+void futex_wake(uint32_t* uaddr, int count) {
+    futex(uaddr, FUTEX_WAKE, count);
+}
+#endif
+
+/* Per-process notification pipe */
+static int create_notification_pipe(int pipefd[2]) {
+    if (pipe(pipefd) == -1) {
+        perror("pipe");
+        return -1;
+    }
+    return 0;
+}
+#define eventfd(val, flags) -1 // Not used
+#define eventfd_write(fd, val) do { uint64_t v = (val); write((fd), &v, sizeof(v)); } while(0)
+#define eventfd_close(fd) close(fd)
 
 /* Function prototypes */
-
-// Utility functions
 static inline uint64_t get_timestamp_us(void);
 static int cmp_uint64(const void *a, const void *b);
 void calculate_stats(uint64_t* latencies, size_t count, BenchmarkStats* stats);
 void print_stats(BenchmarkStats* stats, const char* title);
 double get_cpu_usage(void);
+static uint32_t calculate_checksum(const void* data, size_t len);
+static bool validate_message(const Message* msg, size_t total_size);
 void random_message(Message* msg, int min_size, int max_size);
 void* alloc_aligned_buffer(size_t size);
-static inline long futex(uint32_t* uaddr, int futex_op, uint32_t val);
 
-// Mode 1: Unix Domain Socket with io_uring
+// Mode 1: Unix Domain Socket
 int setup_uds_server(const char* socket_path);
 int setup_uds_client(const char* socket_path);
 void run_uds_server(int socket_fd, int duration_secs);
 void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats);
 
-// Mode 2: Shared Memory with pthread_mutex, thread and eventfd
-RingBuffer* setup_shared_memory(size_t size);
+// Mode 2: Shared Memory with pthread_mutex
+RingBuffer* setup_shared_memory(size_t size, bool is_server);
 void* notification_thread(void* arg);
 bool ring_buffer_read(RingBuffer* rb, void* data, size_t max_len, size_t* bytes_read);
 bool ring_buffer_write_client_to_server(RingBuffer* rb, const void* data, size_t len);
@@ -133,14 +175,14 @@ bool ring_buffer_write_server_to_client(RingBuffer* rb, const void* data, size_t
 void run_shm_server(RingBuffer* rb, int duration_secs);
 void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats);
 
-// Mode 3: Linux-optimized implementation with futex and lock-free ring buffer
+#ifdef HAVE_FUTEX
+// Mode 3: Linux-optimized implementation with futex
 LockFreeRingBuffer* setup_lockfree_shared_memory(size_t size);
 bool lfring_write(LockFreeRingBuffer* rb, const void* data, size_t len);
 bool lfring_read(LockFreeRingBuffer* rb, void* data, size_t max_len, size_t* bytes_read);
-void futex_wait(uint32_t* uaddr, uint32_t val);
-void futex_wake(uint32_t* uaddr, int count);
 void run_lfshm_server(LockFreeRingBuffer* rb, int duration_secs);
 void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats* stats);
+#endif
 
 /*
  * Main function - Parses command line and starts the appropriate benchmark
@@ -162,7 +204,12 @@ int main(int argc, char** argv) {
             } else if (strcmp(argv[i+1], "shm") == 0) {
                 mode = MODE_SHM;
             } else if (strcmp(argv[i+1], "lfshm") == 0) {
+                #ifdef HAVE_FUTEX
                 mode = MODE_LFSHM;
+                #else
+                fprintf(stderr, "lfshm mode requires Linux with futex support\n");
+                return 1;
+                #endif
             } else {
                 fprintf(stderr, "Unknown mode: %s\n", argv[i+1]);
                 return 1;
@@ -189,7 +236,7 @@ int main(int argc, char** argv) {
 
     // Run the appropriate benchmark
     if (mode == MODE_UDS) {
-        printf("Mode: Unix Domain Socket with io_uring\n");
+        printf("Mode: Unix Domain Socket\n");
         if (is_server) {
             // Remove socket if it exists
             unlink(SOCKET_PATH);
@@ -219,15 +266,12 @@ int main(int argc, char** argv) {
             print_stats(&stats, "Unix Domain Socket Results");
         }
     } else if (mode == MODE_SHM) {
-        printf("Mode: Shared Memory with pthread_mutex and io_uring\n");
-        
-        // Setup shared memory
-        RingBuffer* rb = setup_shared_memory(BUFFER_SIZE);
+        printf("Mode: Shared Memory with pthread_mutex\n");
+        RingBuffer* rb = setup_shared_memory(BUFFER_SIZE, is_server);
         if (!rb) {
             fprintf(stderr, "Failed to setup shared memory\n");
             return 1;
         }
-        
         if (is_server) {
             printf("Server running...\n");
             run_shm_server(rb, RUN_DURATION);
@@ -236,14 +280,12 @@ int main(int argc, char** argv) {
             run_shm_client(rb, RUN_DURATION, &stats);
             print_stats(&stats, "Shared Memory with pthread_mutex Results");
         }
-        
-        // Cleanup
         munmap(rb, BUFFER_SIZE + sizeof(RingBuffer));
         if (is_server) {
             shm_unlink(SHM_NAME);
         }
-        
     } else if (mode == MODE_LFSHM) {
+        #ifdef HAVE_FUTEX
         printf("Mode: Lock-free Shared Memory with futex\n");
         
         // Setup lockfree shared memory
@@ -267,6 +309,7 @@ int main(int argc, char** argv) {
         if (is_server) {
             shm_unlink(SHM_NAME);
         }
+        #endif
     }
 
     return 0;
@@ -329,7 +372,52 @@ double get_cpu_usage(void) {
            (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
 }
 
-/* Generate a random message with a size between min_size and max_size */
+/* Calculate checksum of message data */
+static uint32_t calculate_checksum(const void* data, size_t len) {
+    const uint8_t* bytes = (const uint8_t*)data;
+    uint32_t sum = 0;
+    for (size_t i = 0; i < len; i++) {
+        sum = (sum << 1) | (sum >> 31);  // Rotate left by 1
+        sum += bytes[i];
+    }
+    return sum;
+}
+
+/* Validate a message */
+static bool validate_message(const Message* msg, size_t total_size) {
+    if (msg->magic_start != MAGIC_START) {
+        fprintf(stderr, "Message validation failed: invalid magic_start (got 0x%x, expected 0x%x)\n",
+                msg->magic_start, MAGIC_START);
+        return false;
+    }
+    
+    if (msg->size != total_size) {
+        fprintf(stderr, "Message validation failed: size mismatch (got %u, expected %zu)\n",
+                msg->size, total_size);
+        return false;
+    }
+    
+    // Get magic_end which is stored after the data
+    uint32_t magic_end;
+    memcpy(&magic_end, msg->data + (total_size - sizeof(Message) - sizeof(uint32_t)), sizeof(uint32_t));
+    if (magic_end != MAGIC_END) {
+        fprintf(stderr, "Message validation failed: invalid magic_end (got 0x%x, expected 0x%x)\n",
+                magic_end, MAGIC_END);
+        return false;
+    }
+    
+    // Calculate and verify checksum
+    uint32_t calc_checksum = calculate_checksum(msg->data, total_size - sizeof(Message) - sizeof(uint32_t));
+    if (calc_checksum != msg->checksum) {
+        fprintf(stderr, "Message validation failed: invalid checksum (got 0x%x, expected 0x%x)\n",
+                calc_checksum, msg->checksum);
+        return false;
+    }
+    
+    return true;
+}
+
+/* Fill a message with random data and validation fields */
 void random_message(Message* msg, int min_size, int max_size) {
     int range = max_size - min_size;
     int payload_size = min_size;
@@ -338,43 +426,28 @@ void random_message(Message* msg, int min_size, int max_size) {
         payload_size += rand() % range;
     }
     
-    msg->size = sizeof(Message) + payload_size;
+    msg->magic_start = MAGIC_START;
+    msg->size = sizeof(Message) + payload_size + sizeof(uint32_t); // Include magic_end
     msg->seq++;
     msg->timestamp = get_timestamp_us();
     
-    // Fill with random data
+    // Fill with random but deterministic data based on sequence number
+    uint32_t rand_state = msg->seq;
     for (int i = 0; i < payload_size; i++) {
-        msg->data[i] = rand() % 256;
+        rand_state = rand_state * 1103515245 + 12345;
+        msg->data[i] = (rand_state >> 16) & 0xFF;
     }
-}
-
-/* Allocate buffer with proper alignment */
-void* alloc_aligned_buffer(size_t size) {
-    void* buf;
-    if (posix_memalign(&buf, 4096, size) != 0) {
-        perror("posix_memalign");
-        return NULL;
-    }
-    return buf;
-}
-
-/* Direct futex syscall wrapper */
-static inline long futex(uint32_t* uaddr, int futex_op, uint32_t val) {
-    return syscall(SYS_futex, uaddr, futex_op, val, NULL, NULL, 0);
-}
-
-/* Wait on a futex */
-void futex_wait(uint32_t* uaddr, uint32_t val) {
-    futex(uaddr, FUTEX_WAIT, val);
-}
-
-/* Wake threads waiting on a futex */
-void futex_wake(uint32_t* uaddr, int count) {
-    futex(uaddr, FUTEX_WAKE, count);
+    
+    // Calculate checksum of the data
+    msg->checksum = calculate_checksum(msg->data, payload_size);
+    
+    // Write magic_end after the data
+    uint32_t magic_end = MAGIC_END;
+    memcpy(msg->data + payload_size, &magic_end, sizeof(magic_end));
 }
 
 /*
- * Mode 1: Unix Domain Socket with io_uring
+ * Mode 1: Unix Domain Socket implementation
  */
 
 /* Setup a server-side Unix domain socket */
@@ -453,91 +526,99 @@ int setup_uds_client(const char* socket_path) {
 
 /* Run the Unix Domain Socket server benchmark */
 void run_uds_server(int socket_fd, int duration_secs) {
-    struct io_uring ring;
-    void* buffer = alloc_aligned_buffer(MAX_MSG_SIZE);
-    
-    // Initialize io_uring
-    if (io_uring_queue_init(QUEUE_DEPTH, &ring, 0) < 0) {
-        perror("io_uring_queue_init");
-        free(buffer);
+    void* buffer = malloc(MAX_MSG_SIZE);
+    if (!buffer) {
+        perror("malloc");
         return;
     }
-    
+
     // Start the benchmark
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
     
-    // Submit the first read
-    struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_recv(sqe, socket_fd, buffer, MAX_MSG_SIZE, 0);
-    sqe->user_data = 1;  // Mark as read operation
-    io_uring_submit(&ring);
-    
+    // Set socket to non-blocking mode
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK);
+
+    fd_set read_fds, write_fds;
+    bool waiting_to_write = false;
+    size_t msg_size = 0;
+
     while (get_timestamp_us() < end_time) {
-        struct io_uring_cqe* cqe;
+        struct timeval timeout = {.tv_sec = 0, .tv_usec = 10000}; // 10ms timeout
         
-        // Wait for completion
-        int ret = io_uring_wait_cqe(&ring, &cqe);
+        FD_ZERO(&read_fds);
+        FD_ZERO(&write_fds);
+        
+        if (!waiting_to_write) {
+            FD_SET(socket_fd, &read_fds);
+        }
+        if (waiting_to_write) {
+            FD_SET(socket_fd, &write_fds);
+        }
+        
+        int ret = select(socket_fd + 1, &read_fds, &write_fds, NULL, &timeout);
         if (ret < 0) {
-            perror("io_uring_wait_cqe");
+            if (errno == EINTR) continue;
+            perror("select");
             break;
         }
         
-        // Process the completion
-        if (cqe->user_data == 1) {  // Read operation
-            if (cqe->res <= 0) {
-                // Error or connection closed
-                io_uring_cqe_seen(&ring, cqe);
+        if (FD_ISSET(socket_fd, &read_fds)) {
+            ssize_t bytes_read = read(socket_fd, buffer, MAX_MSG_SIZE);
+            if (bytes_read == 0) {
+                // Clean shutdown - remote end closed connection
+                printf("Connection closed by remote end\n");
                 break;
+            } else if (bytes_read < 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    perror("read");
+                    break;
+                }
+                continue;
             }
             
-            // Prepare to send the response back
             Message* msg = (Message*)buffer;
-            
-            // Submit the write
-            sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_send(sqe, socket_fd, buffer, msg->size, 0);
-            sqe->user_data = 2;  // Mark as write operation
-            io_uring_submit(&ring);
-            
-        } else if (cqe->user_data == 2) {  // Write operation
-            if (cqe->res <= 0) {
-                // Error or connection closed
-                io_uring_cqe_seen(&ring, cqe);
-                break;
+            if (!validate_message(msg, bytes_read)) {
+                fprintf(stderr, "Server: Message validation failed\n");
+                continue;
             }
             
-            // Submit the next read
-            sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_recv(sqe, socket_fd, buffer, MAX_MSG_SIZE, 0);
-            sqe->user_data = 1;  // Mark as read operation
-            io_uring_submit(&ring);
+            msg_size = msg->size;
+            waiting_to_write = true;
         }
         
-        io_uring_cqe_seen(&ring, cqe);
+        if (FD_ISSET(socket_fd, &write_fds)) {
+            ssize_t bytes_written = write(socket_fd, buffer, msg_size);
+            if (bytes_written <= 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    perror("write");
+                    break;
+                }
+                continue;
+            }
+            waiting_to_write = false;
+        }
     }
     
-    // Cleanup
-    io_uring_queue_exit(&ring);
     free(buffer);
 }
 
 /* Run the Unix Domain Socket client benchmark */
 void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
-    struct io_uring ring;
-    void* buffer = alloc_aligned_buffer(MAX_MSG_SIZE);
-    memset(buffer, 0, MAX_MSG_SIZE);
-    
-    uint64_t* latencies = malloc(sizeof(uint64_t) * MAX_LATENCIES);
-    size_t latency_count = 0;
-    
-    // Initialize io_uring
-    if (io_uring_queue_init(QUEUE_DEPTH, &ring, 0) < 0) {
-        perror("io_uring_queue_init");
-        free(buffer);
-        free(latencies);
+    void* buffer = malloc(MAX_MSG_SIZE);
+    if (!buffer) {
+        perror("malloc");
         return;
     }
+
+    uint64_t* latencies = malloc(sizeof(uint64_t) * MAX_LATENCIES);
+    if (!latencies) {
+        perror("malloc");
+        free(buffer);
+        return;
+    }
+    size_t latency_count = 0;
     
     // Initialize the message
     Message* msg = (Message*)buffer;
@@ -546,58 +627,70 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
     // Record CPU usage at start
     double cpu_start = get_cpu_usage();
     
+    // Set socket to non-blocking mode
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK);
+    
     // Start warmup
     uint64_t start_warmup = get_timestamp_us();
     uint64_t end_warmup = start_warmup + (WARMUP_DURATION * 1000000ULL);
     
     // Send the first message (warmup)
     random_message(msg, 2048, 4096);
-    struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_send(sqe, socket_fd, buffer, msg->size, 0);
-    sqe->user_data = 2;  // Mark as write operation
-    io_uring_submit(&ring);
+    bool waiting_for_read = false;
+    bool waiting_to_write = true;
+    
+    fd_set read_fds, write_fds;
     
     // Warmup phase
     while (get_timestamp_us() < end_warmup) {
-        struct io_uring_cqe* cqe;
+        struct timeval timeout = {.tv_sec = 0, .tv_usec = 10000}; // 10ms timeout
         
-        // Wait for completion
-        int ret = io_uring_wait_cqe(&ring, &cqe);
+        FD_ZERO(&read_fds);
+        FD_ZERO(&write_fds);
+        
+        if (waiting_for_read) {
+            FD_SET(socket_fd, &read_fds);
+        }
+        if (waiting_to_write) {
+            FD_SET(socket_fd, &write_fds);
+        }
+        
+        int ret = select(socket_fd + 1, &read_fds, &write_fds, NULL, &timeout);
         if (ret < 0) {
-            perror("io_uring_wait_cqe");
+            if (errno == EINTR) continue;
+            perror("select");
             break;
         }
         
-        // Process the completion
-        if (cqe->user_data == 2) {  // Write operation completed
-            if (cqe->res <= 0) {
-                // Error or connection closed
-                io_uring_cqe_seen(&ring, cqe);
-                break;
+        if (FD_ISSET(socket_fd, &write_fds)) {
+            ssize_t bytes_written = write(socket_fd, buffer, msg->size);
+            if (bytes_written <= 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    perror("write");
+                    break;
+                }
+                continue;
             }
-            
-            // Submit a read to get the response
-            sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_recv(sqe, socket_fd, buffer, MAX_MSG_SIZE, 0);
-            sqe->user_data = 1;  // Mark as read operation
-            io_uring_submit(&ring);
-            
-        } else if (cqe->user_data == 1) {  // Read operation completed
-            if (cqe->res <= 0) {
-                // Error or connection closed
-                io_uring_cqe_seen(&ring, cqe);
-                break;
-            }
-            
-            // Send the next message
-            random_message(msg, 2048, 4096);
-            sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_send(sqe, socket_fd, buffer, msg->size, 0);
-            sqe->user_data = 2;  // Mark as write operation
-            io_uring_submit(&ring);
+            waiting_to_write = false;
+            waiting_for_read = true;
         }
         
-        io_uring_cqe_seen(&ring, cqe);
+        if (FD_ISSET(socket_fd, &read_fds)) {
+            ssize_t bytes_read = read(socket_fd, buffer, MAX_MSG_SIZE);
+            if (bytes_read <= 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    perror("read");
+                    break;
+                }
+                continue;
+            }
+            
+            // Send the next warmup message
+            random_message(msg, 2048, 4096);
+            waiting_to_write = true;
+            waiting_for_read = false;
+        }
     }
     
     printf("Warmup completed, starting benchmark...\n");
@@ -612,46 +705,66 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
     
     // Send the first message (benchmark)
     random_message(msg, 2048, 4096);
-    msg->timestamp = get_timestamp_us();  // Set the timestamp for latency calculation
-    sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_send(sqe, socket_fd, buffer, msg->size, 0);
-    sqe->user_data = 2;  // Mark as write operation
-    io_uring_submit(&ring);
+    msg->timestamp = get_timestamp_us();
+    waiting_to_write = true;
+    waiting_for_read = false;
     
     while (get_timestamp_us() < end_time) {
-        struct io_uring_cqe* cqe;
+        struct timeval timeout = {.tv_sec = 0, .tv_usec = 10000}; // 10ms timeout
         
-        // Wait for completion
-        int ret = io_uring_wait_cqe(&ring, &cqe);
+        FD_ZERO(&read_fds);
+        FD_ZERO(&write_fds);
+        
+        if (waiting_for_read) {
+            FD_SET(socket_fd, &read_fds);
+        }
+        if (waiting_to_write) {
+            FD_SET(socket_fd, &write_fds);
+        }
+        
+        int ret = select(socket_fd + 1, &read_fds, &write_fds, NULL, &timeout);
         if (ret < 0) {
-            perror("io_uring_wait_cqe");
+            if (errno == EINTR) continue;
+            perror("select");
             break;
         }
         
-        // Process the completion
-        if (cqe->user_data == 2) {  // Write operation completed
-            if (cqe->res <= 0) {
-                // Error or connection closed
-                io_uring_cqe_seen(&ring, cqe);
+        if (FD_ISSET(socket_fd, &write_fds)) {
+            ssize_t bytes_written = write(socket_fd, buffer, msg->size);
+            if (bytes_written <= 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    perror("write");
+                    break;
+                }
+                continue;
+            }
+            waiting_to_write = false;
+            waiting_for_read = true;
+        }
+        
+        if (FD_ISSET(socket_fd, &read_fds)) {
+            ssize_t bytes_read = read(socket_fd, buffer, MAX_MSG_SIZE);
+            if (bytes_read == 0) {
+                // Clean shutdown - remote end closed connection
+                printf("\nBenchmark completed successfully\n");
                 break;
+            } else if (bytes_read < 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    perror("read");
+                    break;
+                }
+                continue;
             }
             
-            // Submit a read to get the response
-            sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_recv(sqe, socket_fd, buffer, MAX_MSG_SIZE, 0);
-            sqe->user_data = 1;  // Mark as read operation
-            io_uring_submit(&ring);
-            
-        } else if (cqe->user_data == 1) {  // Read operation completed
-            if (cqe->res <= 0) {
-                // Error or connection closed
-                io_uring_cqe_seen(&ring, cqe);
-                break;
+            Message* response = (Message*)buffer;
+            if (!validate_message(response, bytes_read)) {
+                fprintf(stderr, "Client: Message validation failed\n");
+                continue;
             }
             
             // Calculate latency
             uint64_t now = get_timestamp_us();
-            uint64_t latency = now - msg->timestamp;
+            uint64_t latency = now - response->timestamp;
             
             if (latency_count < MAX_LATENCIES) {
                 latencies[latency_count++] = latency;
@@ -659,23 +772,19 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
             
             // Update statistics
             ops++;
-            bytes += msg->size;
+            bytes += bytes_read;
             
             // Send the next message
             random_message(msg, 2048, 4096);
-            msg->timestamp = get_timestamp_us();  // Update timestamp for next latency calculation
-            sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_send(sqe, socket_fd, buffer, msg->size, 0);
-            sqe->user_data = 2;  // Mark as write operation
-            io_uring_submit(&ring);
+            msg->timestamp = get_timestamp_us();
+            waiting_to_write = true;
+            waiting_for_read = false;
         }
-        
-        io_uring_cqe_seen(&ring, cqe);
     }
     
     // Record CPU usage
     double cpu_end = get_cpu_usage();
-    double cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);  // Convert to percentage
+    double cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);
     
     // Update stats
     stats->ops = ops;
@@ -684,7 +793,6 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
     calculate_stats(latencies, latency_count, stats);
     
     // Cleanup
-    io_uring_queue_exit(&ring);
     free(buffer);
     free(latencies);
 }
@@ -694,54 +802,122 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
  */
 
 /* Setup shared memory with pthread mutex and condition variables */
-RingBuffer* setup_shared_memory(size_t size) {
-    // Create or open the shared memory object
-    int fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (fd == -1) {
-        perror("shm_open");
-        return NULL;
+RingBuffer* setup_shared_memory(size_t size, bool is_server) {
+    int fd;
+    RingBuffer* rb = NULL;
+    size_t total_size;
+    total_size = sizeof(RingBuffer) + size;
+
+#ifdef __APPLE__
+    size_t page_size = getpagesize();
+    total_size = (total_size + page_size - 1) & ~(page_size - 1);
+    if (is_server) {
+        // Server: create and truncate
+        shm_unlink(SHM_NAME); // Ensure old segment is gone
+        fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
+        if (fd == -1) {
+            perror("shm_open (server)");
+            return NULL;
+        }
+        if (ftruncate(fd, total_size) == -1) {
+            perror("ftruncate");
+            close(fd);
+            shm_unlink(SHM_NAME);
+            return NULL;
+        }
+    } else {
+        // Client: retry open until available
+        int retries = 10;
+        while (retries--) {
+            fd = shm_open(SHM_NAME, O_RDWR, 0666);
+            if (fd != -1) break;
+            sleep(1);
+        }
+        if (fd == -1) {
+            perror("shm_open (client)");
+            return NULL;
+        }
     }
-    
-    // Set the size of the shared memory object
-    if (ftruncate(fd, sizeof(RingBuffer) + size) == -1) {
-        perror("ftruncate");
-        close(fd);
+#else
+    if (is_server) {
         shm_unlink(SHM_NAME);
-        return NULL;
+        fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
+        if (fd == -1) {
+            perror("shm_open (server)");
+            return NULL;
+        }
+        if (ftruncate(fd, total_size) == -1) {
+            perror("ftruncate");
+            close(fd);
+            shm_unlink(SHM_NAME);
+            return NULL;
+        }
+    } else {
+        int retries = 10;
+        while (retries--) {
+            fd = shm_open(SHM_NAME, O_RDWR, 0666);
+            if (fd != -1) break;
+            sleep(1);
+        }
+        if (fd == -1) {
+            perror("shm_open (client)");
+            return NULL;
+        }
     }
-    
-    // Map the shared memory object
-    RingBuffer* rb = mmap(NULL, sizeof(RingBuffer) + size, 
-                         PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+#endif
+    rb = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (rb == MAP_FAILED) {
         perror("mmap");
         close(fd);
-        shm_unlink(SHM_NAME);
+        if (is_server) shm_unlink(SHM_NAME);
         return NULL;
     }
-    
-    // Initialize pthread objects with process-shared attribute
-    pthread_mutexattr_t mutex_attr;
-    pthread_mutexattr_init(&mutex_attr);
-    pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
-    pthread_mutex_init(&rb->mutex, &mutex_attr);
-    pthread_mutexattr_destroy(&mutex_attr);
-    
-    pthread_condattr_t cond_attr;
-    pthread_condattr_init(&cond_attr);
-    pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
-    pthread_cond_init(&rb->server_cond, &cond_attr);
-    pthread_cond_init(&rb->client_cond, &cond_attr);
-    pthread_condattr_destroy(&cond_attr);
-    
-    // Initialize other fields
-    rb->read_pos = 0;
-    rb->write_pos = 0;
-    rb->size = size;
-    rb->message_available = false;
-    rb->response_available = false;
-    
-    close(fd);  // Keep mapped, but close the file descriptor
+    if (is_server) {
+        pthread_mutexattr_t mutex_attr;
+        pthread_mutexattr_init(&mutex_attr);
+        pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
+        if (pthread_mutex_init(&rb->mutex, &mutex_attr) != 0) {
+            perror("pthread_mutex_init");
+            munmap(rb, total_size);
+            close(fd);
+            shm_unlink(SHM_NAME);
+            return NULL;
+        }
+        pthread_mutexattr_destroy(&mutex_attr);
+        pthread_condattr_t cond_attr;
+        pthread_condattr_init(&cond_attr);
+        pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
+        if (pthread_cond_init(&rb->server_cond, &cond_attr) != 0 ||
+            pthread_cond_init(&rb->client_cond, &cond_attr) != 0) {
+            perror("pthread_cond_init");
+            pthread_mutex_destroy(&rb->mutex);
+            munmap(rb, total_size);
+            close(fd);
+            shm_unlink(SHM_NAME);
+            return NULL;
+        }
+        pthread_condattr_destroy(&cond_attr);
+        rb->read_pos = 0;
+        rb->write_pos = 0;
+        rb->size = size;
+        rb->message_available = false;
+        rb->response_available = false;
+        rb->ready = true;
+    }
+    if (!is_server) {
+        // Wait for server to set ready flag
+        int wait_count = 0;
+        while (!rb->ready) {
+            usleep(1000); // 1ms
+            if (++wait_count > 5000) { // 5 seconds max
+                fprintf(stderr, "Timeout waiting for server to initialize shared memory\n");
+                munmap(rb, total_size);
+                close(fd);
+                return NULL;
+            }
+        }
+    }
+    close(fd);
     return rb;
 }
 
@@ -759,35 +935,29 @@ void* notification_thread(void* arg) {
         // Client thread waits for response_available
         if (data->is_server) {
             while (!rb->message_available && !data->should_exit) {
-                printf("Server thread waiting for message\n");
                 pthread_cond_wait(&rb->server_cond, &rb->mutex);
-                printf("Server thread woke up\n");
             }
             
             if (rb->message_available && !data->should_exit) {
                 rb->message_available = false;
-                // Signal the eventfd to wake up the io_uring event loop
+                // Signal the eventfd to wake up the select() loop
                 uint64_t val = 1;
-                if (write(data->eventfd, &val, sizeof(val)) != sizeof(val)) {
+                if (write(data->notif_fd, &val, sizeof(val)) != sizeof(val)) {
                     perror("write eventfd");
                 }
-                printf("Server thread signaled eventfd\n");
             }
         } else {
             while (!rb->response_available && !data->should_exit) {
-                printf("Client thread waiting for response\n");
                 pthread_cond_wait(&rb->client_cond, &rb->mutex);
-                printf("Client thread woke up\n");
             }
             
             if (rb->response_available && !data->should_exit) {
                 rb->response_available = false;
-                // Signal the eventfd to wake up the io_uring event loop
+                // Signal the eventfd to wake up the select() loop
                 uint64_t val = 1;
-                if (write(data->eventfd, &val, sizeof(val)) != sizeof(val)) {
+                if (write(data->notif_fd, &val, sizeof(val)) != sizeof(val)) {
                     perror("write eventfd");
                 }
-                printf("Client thread signaled eventfd\n");
             }
         }
         
@@ -858,40 +1028,34 @@ bool ring_buffer_read(RingBuffer* rb, void* data, size_t max_len, size_t* bytes_
 
 /* Write a message from client to server */
 bool ring_buffer_write_client_to_server(RingBuffer* rb, const void* data, size_t len) {
-    if (len > rb->size / 2) {
-        // Prevent a single message from taking more than half the buffer
-        return false;
-    }
+    uint64_t start_time = get_timestamp_us();
     
     pthread_mutex_lock(&rb->mutex);
+    uint64_t mutex_end = get_timestamp_us();
+    rb->mutex_lock_time += (mutex_end - start_time);
     
-    // Calculate available space
-    size_t available;
-    if (rb->write_pos >= rb->read_pos) {
-        available = rb->size - (rb->write_pos - rb->read_pos);
-    } else {
-        available = rb->read_pos - rb->write_pos;
+    // Wait for space in the buffer
+    while (rb->write_pos == rb->read_pos && rb->message_available) {
+        uint64_t wait_start = get_timestamp_us();
+        pthread_cond_wait(&rb->server_cond, &rb->mutex);
+        uint64_t wait_end = get_timestamp_us();
+        rb->cond_wait_time += (wait_end - wait_start);
     }
     
-    // Check if there's enough space (reserving 1 byte to distinguish empty from full)
-    if (available <= len + sizeof(uint32_t) + 1) {
-        pthread_mutex_unlock(&rb->mutex);
-        return false;
-    }
-    
-    // Write the message length first
-    uint32_t msg_len = len;
+    // Write the message
+    uint64_t copy_start = get_timestamp_us();
     size_t write_pos = rb->write_pos;
     
+    // Write the length first
     if (write_pos + sizeof(uint32_t) > rb->size) {
         // Wrap around for the length
         size_t first_chunk = rb->size - write_pos;
-        memcpy(rb->buffer + write_pos, &msg_len, first_chunk);
-        memcpy(rb->buffer, ((char*)&msg_len) + first_chunk, sizeof(uint32_t) - first_chunk);
+        memcpy(rb->buffer + write_pos, &len, first_chunk);
+        memcpy(rb->buffer, ((char*)&len) + first_chunk, sizeof(uint32_t) - first_chunk);
         write_pos = sizeof(uint32_t) - first_chunk;
     } else {
         // Write the length field
-        memcpy(rb->buffer + write_pos, &msg_len, sizeof(uint32_t));
+        memcpy(rb->buffer + write_pos, &len, sizeof(uint32_t));
         write_pos += sizeof(uint32_t);
         if (write_pos == rb->size) {
             write_pos = 0;
@@ -914,14 +1078,22 @@ bool ring_buffer_write_client_to_server(RingBuffer* rb, const void* data, size_t
         }
     }
     
+    uint64_t copy_end = get_timestamp_us();
+    rb->copy_time += (copy_end - copy_start);
+    
     // Update the write position
     rb->write_pos = write_pos;
     
     // Signal that a message is available
     rb->message_available = true;
+    uint64_t notify_start = get_timestamp_us();
     pthread_cond_signal(&rb->server_cond);
+    uint64_t notify_end = get_timestamp_us();
+    rb->notify_time += (notify_end - notify_start);
     
     pthread_mutex_unlock(&rb->mutex);
+    rb->total_ops++;
+    
     return true;
 }
 
@@ -996,249 +1168,278 @@ bool ring_buffer_write_server_to_client(RingBuffer* rb, const void* data, size_t
 
 /* Run the Shared Memory server benchmark */
 void run_shm_server(RingBuffer* rb, int duration_secs) {
-    struct io_uring ring;
-    void* buffer = alloc_aligned_buffer(MAX_MSG_SIZE);
-    uint64_t eventfd_buffer = 0;
-    
-    // Create local eventfd for notification
+    void* buffer = malloc(MAX_MSG_SIZE);
+    if (!buffer) {
+        perror("malloc");
+        return;
+    }
+#ifndef HAVE_EVENTFD
+    int pipefd[2];
+    if (create_notification_pipe(pipefd) == -1) {
+        free(buffer);
+        return;
+    }
+    int efd = pipefd[0]; // read end for select
+    int notif_write_fd = pipefd[1]; // write end for thread
+#else
     int efd = eventfd(0, EFD_CLOEXEC);
+    int notif_write_fd = efd;
+#endif
     if (efd == -1) {
-        perror("eventfd");
+        perror("eventfd/pipe");
         free(buffer);
         return;
     }
-    
-    // Initialize io_uring
-    if (io_uring_queue_init(QUEUE_DEPTH, &ring, 0) < 0) {
-        perror("io_uring_queue_init");
-        close(efd);
-        free(buffer);
-        return;
-    }
-    
-    // Start notification thread
     ThreadData thread_data = {
         .rb = rb,
-        .eventfd = efd,
+        .notif_fd = notif_write_fd,
         .is_server = true,
         .should_exit = false
     };
-    
     pthread_t notif_thread;
     if (pthread_create(&notif_thread, NULL, notification_thread, &thread_data) != 0) {
         perror("pthread_create");
-        io_uring_queue_exit(&ring);
         close(efd);
+#ifndef HAVE_EVENTFD
+        close(notif_write_fd);
+#endif
         free(buffer);
         return;
     }
-    
     // Start the benchmark
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
     
-    // Submit the first eventfd read
-    struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_read(sqe, efd, &eventfd_buffer, sizeof(eventfd_buffer), 0);
-    sqe->user_data = 1;  // Mark as eventfd read operation
-    io_uring_submit(&ring);
+    // Set up select() parameters
+    fd_set read_fds;
+    struct timeval timeout;
     
     printf("Server ready to process messages\n");
     
+    // Initialize timing metrics
+    rb->mutex_lock_time = 0;
+    rb->cond_wait_time = 0;
+    rb->notify_time = 0;
+    rb->copy_time = 0;
+    rb->total_ops = 0;
+    
     while (get_timestamp_us() < end_time) {
-        struct io_uring_cqe* cqe;
+        FD_ZERO(&read_fds);
+        FD_SET(efd, &read_fds);
         
-        // Wait for completion
-        int ret = io_uring_wait_cqe(&ring, &cqe);
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 10000;  // 10ms timeout
+        
+        int ret = select(efd + 1, &read_fds, NULL, NULL, &timeout);
         if (ret < 0) {
-            perror("io_uring_wait_cqe");
+            if (errno == EINTR) continue;
+            perror("select");
             break;
         }
         
-        // Process the completion
-        if (cqe->user_data == 1) {  // eventfd notification
-            if (cqe->res > 0) {
-                printf("Server received eventfd notification\n");
-                
-                // Read message from the ring buffer
-                size_t bytes_read;
-                pthread_mutex_lock(&rb->mutex);
-                bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &bytes_read);
-                pthread_mutex_unlock(&rb->mutex);
-                
-                if (read_success) {
-                    printf("Server read message: %zu bytes\n", bytes_read);
-                    
-                    // Process the message (echo it back)
-                    Message* msg = (Message*)buffer;
-                    
-                    // Write response back
-                    if (ring_buffer_write_server_to_client(rb, buffer, msg->size)) {
-                        printf("Server wrote response\n");
-                    } else {
-                        printf("Server failed to write response\n");
-                    }
-                } else {
-                    printf("Server failed to read message\n");
+        if (FD_ISSET(efd, &read_fds)) {
+            // Read the notification
+            uint64_t notification = 0;
+            ssize_t bytes_read = read(efd, &notification, sizeof(notification));
+            if (bytes_read <= 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    perror("read eventfd");
+                    break;
                 }
-            } else {
-                printf("Server got eventfd read error: %d\n", cqe->res);
+                continue;
             }
             
-            // Resubmit eventfd read
-            eventfd_buffer = 0;  // Reset buffer
-            sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_read(sqe, efd, &eventfd_buffer, sizeof(eventfd_buffer), 0);
-            sqe->user_data = 1;  // Mark as eventfd read operation
-            io_uring_submit(&ring);
+            // Read message from ring buffer
+            size_t msg_size;
+            pthread_mutex_lock(&rb->mutex);
+            bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
+            pthread_mutex_unlock(&rb->mutex);
+            
+            if (read_success) {
+                Message* msg = (Message*)buffer;
+                if (!validate_message(msg, msg_size)) {
+                    fprintf(stderr, "Server: Message validation failed\n");
+                    continue;
+                }
+                
+                // Echo the message back
+                if (!ring_buffer_write_server_to_client(rb, buffer, msg_size)) {
+                    fprintf(stderr, "Failed to write response to ring buffer\n");
+                }
+            }
         }
-        
-        io_uring_cqe_seen(&ring, cqe);
     }
     
-    // Signal thread to exit
+    if (get_timestamp_us() >= end_time - 100000) { // Within 100ms of end
+        printf("Server shutting down...\n");
+    }
+
+    // Signal thread to exit and cleanup
     thread_data.should_exit = true;
     pthread_mutex_lock(&rb->mutex);
-    pthread_cond_signal(&rb->server_cond);  // Wake up the thread
+    pthread_cond_signal(&rb->server_cond);
     pthread_mutex_unlock(&rb->mutex);
     
     pthread_join(notif_thread, NULL);
     printf("Server notification thread joined\n");
     
     // Cleanup
-    io_uring_queue_exit(&ring);
+#ifdef HAVE_EVENTFD
     close(efd);
+#else
+    close(efd);
+    close(notif_write_fd);
+#endif
     free(buffer);
+
+    // Print timing metrics at the end
+    printf("\nDetailed Timing Metrics:\n");
+    printf("Total Operations: %lu\n", rb->total_ops);
+    printf("Average Mutex Lock Time: %.2f µs\n", (double)rb->mutex_lock_time / rb->total_ops);
+    printf("Average Condition Wait Time: %.2f µs\n", (double)rb->cond_wait_time / rb->total_ops);
+    printf("Average Notification Time: %.2f µs\n", (double)rb->notify_time / rb->total_ops);
+    printf("Average Copy Time: %.2f µs\n", (double)rb->copy_time / rb->total_ops);
+    printf("Total Synchronization Overhead: %.2f µs\n", 
+           (double)(rb->mutex_lock_time + rb->cond_wait_time + rb->notify_time) / rb->total_ops);
 }
 
 /* Run the Shared Memory client benchmark */
 void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
-    struct io_uring ring;
-    void* buffer = alloc_aligned_buffer(MAX_MSG_SIZE);
-    memset(buffer, 0, MAX_MSG_SIZE);
-    uint64_t eventfd_buffer = 0;
-    
+    void* buffer = malloc(MAX_MSG_SIZE);
+    if (!buffer) {
+        perror("malloc");
+        return;
+    }
     uint64_t* latencies = malloc(sizeof(uint64_t) * MAX_LATENCIES);
+    if (!latencies) {
+        perror("malloc");
+        free(buffer);
+        return;
+    }
     size_t latency_count = 0;
-    
-    // Create local eventfd for notification
+    double cpu_start = get_cpu_usage();
+#ifndef HAVE_EVENTFD
+    int pipefd[2];
+    if (create_notification_pipe(pipefd) == -1) {
+        free(buffer);
+        free(latencies);
+        return;
+    }
+    int efd = pipefd[0]; // read end for select
+    int notif_write_fd = pipefd[1]; // write end for thread
+#else
     int efd = eventfd(0, EFD_CLOEXEC);
+    int notif_write_fd = efd;
+#endif
     if (efd == -1) {
-        perror("eventfd");
+        perror("eventfd/pipe");
         free(buffer);
         free(latencies);
         return;
     }
-    
-    // Initialize io_uring
-    if (io_uring_queue_init(QUEUE_DEPTH, &ring, 0) < 0) {
-        perror("io_uring_queue_init");
-        close(efd);
-        free(buffer);
-        free(latencies);
-        return;
-    }
-    
-    // Start notification thread
     ThreadData thread_data = {
         .rb = rb,
-        .eventfd = efd,
+        .notif_fd = notif_write_fd,
         .is_server = false,
         .should_exit = false
     };
-    
     pthread_t notif_thread;
     if (pthread_create(&notif_thread, NULL, notification_thread, &thread_data) != 0) {
         perror("pthread_create");
-        io_uring_queue_exit(&ring);
         close(efd);
+#ifndef HAVE_EVENTFD
+        close(notif_write_fd);
+#endif
         free(buffer);
         free(latencies);
         return;
     }
-    
     // Initialize the message
     Message* msg = (Message*)buffer;
     msg->seq = 0;
     
-    // Record CPU usage at start
-    double cpu_start = get_cpu_usage();
-    
     // Start warmup
     uint64_t start_warmup = get_timestamp_us();
     uint64_t end_warmup = start_warmup + (WARMUP_DURATION * 1000000ULL);
+    uint64_t notification = 0;
     
     // Send the first message (warmup)
     random_message(msg, 2048, 4096);
-    printf("Client sending first message\n");
     if (!ring_buffer_write_client_to_server(rb, buffer, msg->size)) {
         fprintf(stderr, "Failed to write message to ring buffer\n");
         goto cleanup;
     }
     
-    // Submit the first eventfd read
-    struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_read(sqe, efd, &eventfd_buffer, sizeof(eventfd_buffer), 0);
-    sqe->user_data = 1;  // Mark as eventfd read operation
-    io_uring_submit(&ring);
-    
-    printf("Client warmup phase starting\n");
+    // Set up select() parameters
+    fd_set read_fds;
+    struct timeval timeout;
     
     // Warmup phase
     while (get_timestamp_us() < end_warmup) {
-        struct io_uring_cqe* cqe;
+        FD_ZERO(&read_fds);
+        FD_SET(efd, &read_fds);
         
-        // Wait for completion
-        int ret = io_uring_wait_cqe(&ring, &cqe);
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 10000;  // 10ms timeout
+        
+        int ret = select(efd + 1, &read_fds, NULL, NULL, &timeout);
         if (ret < 0) {
-            perror("io_uring_wait_cqe");
+            if (errno == EINTR) continue;
+            perror("select");
             break;
         }
         
-        // Process the completion
-        if (cqe->user_data == 1) {  // eventfd notification
-            if (cqe->res > 0) {
-                printf("Client received eventfd notification\n");
-                
-                // Read response from ring buffer
-                size_t bytes_read;
-                pthread_mutex_lock(&rb->mutex);
-                bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &bytes_read);
-                pthread_mutex_unlock(&rb->mutex);
-                
-                if (read_success) {
-                    printf("Client read response: %zu bytes\n", bytes_read);
-                    
-                    // Send the next message
-                    random_message(msg, 2048, 4096);
-                    if (ring_buffer_write_client_to_server(rb, buffer, msg->size)) {
-                        printf("Client wrote next message\n");
-                    } else {
-                        printf("Client failed to write next message\n");
-                    }
-                } else {
-                    printf("Client failed to read response\n");
+        if (FD_ISSET(efd, &read_fds)) {
+            // Read the notification
+            ssize_t bytes_read = read(efd, &notification, sizeof(notification));
+            if (bytes_read <= 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    perror("read eventfd");
+                    break;
                 }
-            } else {
-                printf("Client got eventfd read error: %d\n", cqe->res);
+                continue;
             }
             
-            // Resubmit eventfd read
-            eventfd_buffer = 0;  // Reset buffer
-            sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_read(sqe, efd, &eventfd_buffer, sizeof(eventfd_buffer), 0);
-            sqe->user_data = 1;  // Mark as eventfd read operation
-            io_uring_submit(&ring);
+            // Read response from ring buffer
+            size_t msg_size;
+            pthread_mutex_lock(&rb->mutex);
+            bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
+            pthread_mutex_unlock(&rb->mutex);
+            
+            if (read_success) {
+                Message* response = (Message*)buffer;
+                if (!validate_message(response, msg_size)) {
+                    fprintf(stderr, "Client: Message validation failed\n");
+                    continue;
+                }
+                
+                // Calculate latency
+                uint64_t now = get_timestamp_us();
+                uint64_t latency = now - response->timestamp;
+                
+                if (latency_count < MAX_LATENCIES) {
+                    latencies[latency_count++] = latency;
+                }
+                
+                // Update statistics
+                stats->ops++;
+                stats->bytes += msg_size;
+                
+                // Send the next message
+                random_message(msg, 2048, 4096);
+                msg->timestamp = get_timestamp_us();
+                if (!ring_buffer_write_client_to_server(rb, buffer, msg->size)) {
+                    fprintf(stderr, "Failed to write message to ring buffer\n");
+                }
+            }
         }
-        
-        io_uring_cqe_seen(&ring, cqe);
     }
     
     printf("Warmup completed, starting benchmark...\n");
     
-    // Reset statistics
-    uint64_t ops = 0;
-    uint64_t bytes = 0;
+    // Reset statistics for benchmark phase
+    stats->ops = 0;
+    stats->bytes = 0;
     
     // Start the benchmark
     uint64_t start_time = get_timestamp_us();
@@ -1246,433 +1447,108 @@ void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
     
     // Send the first message (benchmark)
     random_message(msg, 2048, 4096);
-    msg->timestamp = get_timestamp_us();  // Set the timestamp for latency calculation
+    msg->timestamp = get_timestamp_us();
     if (!ring_buffer_write_client_to_server(rb, buffer, msg->size)) {
         fprintf(stderr, "Failed to write message to ring buffer\n");
         goto cleanup;
     }
-    
-    // Benchmark phase
+
+    // Initialize timing metrics
+    rb->mutex_lock_time = 0;
+    rb->cond_wait_time = 0;
+    rb->notify_time = 0;
+    rb->copy_time = 0;
+    rb->total_ops = 0;
+
     while (get_timestamp_us() < end_time) {
-        struct io_uring_cqe* cqe;
+        FD_ZERO(&read_fds);
+        FD_SET(efd, &read_fds);
         
-        // Wait for completion
-        int ret = io_uring_wait_cqe(&ring, &cqe);
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 10000;  // 10ms timeout
+        
+        int ret = select(efd + 1, &read_fds, NULL, NULL, &timeout);
         if (ret < 0) {
-            perror("io_uring_wait_cqe");
+            if (errno == EINTR) continue;
+            perror("select");
             break;
         }
         
-        // Process the completion
-        if (cqe->user_data == 1) {  // eventfd notification
-            if (cqe->res > 0) {
-                // Read response from ring buffer
-                size_t bytes_read;
-                pthread_mutex_lock(&rb->mutex);
-                bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &bytes_read);
-                pthread_mutex_unlock(&rb->mutex);
-                
-                if (read_success) {
-                    // Calculate latency
-                    uint64_t now = get_timestamp_us();
-                    uint64_t latency = now - msg->timestamp;
-                    
-                    if (latency_count < MAX_LATENCIES) {
-                        latencies[latency_count++] = latency;
-                    }
-                    
-                    // Update statistics
-                    ops++;
-                    bytes += bytes_read;
-                    
-                    // Send the next message
-                    random_message(msg, 2048, 4096);
-                    msg->timestamp = get_timestamp_us();  // Update timestamp for next latency calculation
-                    ring_buffer_write_client_to_server(rb, buffer, msg->size);
+        if (FD_ISSET(efd, &read_fds)) {
+            // Read the notification
+            ssize_t bytes_read = read(efd, &notification, sizeof(notification));
+            if (bytes_read <= 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    perror("read eventfd");
+                    break;
                 }
+                continue;
             }
             
-            // Resubmit eventfd read
-            eventfd_buffer = 0;  // Reset buffer
-            sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_read(sqe, efd, &eventfd_buffer, sizeof(eventfd_buffer), 0);
-            sqe->user_data = 1;  // Mark as eventfd read operation
-            io_uring_submit(&ring);
+            // Read response from ring buffer
+            size_t msg_size;
+            pthread_mutex_lock(&rb->mutex);
+            bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
+            pthread_mutex_unlock(&rb->mutex);
+            
+            if (read_success) {
+                Message* response = (Message*)buffer;
+                if (!validate_message(response, msg_size)) {
+                    fprintf(stderr, "Client: Message validation failed\n");
+                    continue;
+                }
+                
+                // Calculate latency
+                uint64_t now = get_timestamp_us();
+                uint64_t latency = now - response->timestamp;
+                
+                if (latency_count < MAX_LATENCIES) {
+                    latencies[latency_count++] = latency;
+                }
+                
+                // Update statistics
+                stats->ops++;
+                stats->bytes += msg_size;
+                
+                // Send the next message
+                random_message(msg, 2048, 4096);
+                msg->timestamp = get_timestamp_us();
+                if (!ring_buffer_write_client_to_server(rb, buffer, msg->size)) {
+                    fprintf(stderr, "Failed to write message to ring buffer\n");
+                }
+            }
         }
-        
-        io_uring_cqe_seen(&ring, cqe);
     }
     
+    if (get_timestamp_us() >= end_time - 100000) { // Within 100ms of end
+        printf("\nBenchmark completed successfully.\n");
+    }
+
+    // Print timing metrics at the end
+    printf("\nDetailed Timing Metrics:\n");
+    printf("Total Operations: %lu\n", rb->total_ops);
+    printf("Average Mutex Lock Time: %.2f µs\n", (double)rb->mutex_lock_time / rb->total_ops);
+    printf("Average Condition Wait Time: %.2f µs\n", (double)rb->cond_wait_time / rb->total_ops);
+    printf("Average Notification Time: %.2f µs\n", (double)rb->notify_time / rb->total_ops);
+    printf("Average Copy Time: %.2f µs\n", (double)rb->copy_time / rb->total_ops);
+    printf("Total Synchronization Overhead: %.2f µs\n", 
+           (double)(rb->mutex_lock_time + rb->cond_wait_time + rb->notify_time) / rb->total_ops);
+
+cleanup:    
     // Record CPU usage
     double cpu_end = get_cpu_usage();
-    double cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);  // Convert to percentage
-    
-    // Update stats
-    stats->ops = ops;
-    stats->bytes = bytes;
-    stats->cpu_usage = cpu_usage;
+    stats->cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);
+
+    // Calculate final statistics
     calculate_stats(latencies, latency_count, stats);
     
-cleanup:
-    // Signal thread to exit
-    thread_data.should_exit = true;
-    pthread_mutex_lock(&rb->mutex);
-    pthread_cond_signal(&rb->client_cond);  // Wake up the thread
-    pthread_mutex_unlock(&rb->mutex);
-    
-    pthread_join(notif_thread, NULL);
-    printf("Client notification thread joined\n");
-    
-    // Cleanup
-    io_uring_queue_exit(&ring);
+    // Cleanup resources
+#ifdef HAVE_EVENTFD
     close(efd);
-    free(buffer);
-    free(latencies);
-}
-
-/*
- * Mode 3: Linux-optimized implementation with futex and lock-free ring buffer
- */
-
-/* Setup a lock-free shared memory region */
-LockFreeRingBuffer* setup_lockfree_shared_memory(size_t size) {
-    // Create or open the shared memory object
-    int fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (fd == -1) {
-        perror("shm_open");
-        return NULL;
-    }
-    
-    // Set the size of the shared memory object
-    if (ftruncate(fd, sizeof(LockFreeRingBuffer) + size) == -1) {
-        perror("ftruncate");
-        close(fd);
-        shm_unlink(SHM_NAME);
-        return NULL;
-    }
-    
-    // Map the shared memory object
-    LockFreeRingBuffer* rb = mmap(NULL, sizeof(LockFreeRingBuffer) + size, 
-                                PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (rb == MAP_FAILED) {
-        perror("mmap");
-        close(fd);
-        shm_unlink(SHM_NAME);
-        return NULL;
-    }
-    
-    // Initialize the ring buffer
-    atomic_init(&rb->read_pos, 0);
-    atomic_init(&rb->write_pos, 0);
-    rb->size = size;
-    rb->server_futex = 0;
-    rb->client_futex = 0;
-    
-    // Close the file descriptor (memory remains mapped)
-    close(fd);
-    
-    return rb;
-}
-
-/* Write a message to the lock-free ring buffer */
-bool lfring_write(LockFreeRingBuffer* rb, const void* data, size_t len) {
-    if (len > rb->size / 2) {
-        // Prevent a single message from taking more than half the buffer
-        return false;
-    }
-    
-    // Calculate positions and available space
-    size_t write_pos = atomic_load(&rb->write_pos);
-    size_t read_pos = atomic_load(&rb->read_pos);
-    size_t available;
-    
-    if (write_pos >= read_pos) {
-        available = rb->size - (write_pos - read_pos);
-    } else {
-        available = read_pos - write_pos;
-    }
-    
-    // Check if there's enough space (reserving 1 byte to distinguish empty from full)
-    if (available <= len + sizeof(uint32_t) + 1) {
-        return false;
-    }
-    
-    // Write the message length first
-    uint32_t msg_len = len;
-    
-    if (write_pos + sizeof(uint32_t) > rb->size) {
-        // Wrap around for the length
-        size_t first_chunk = rb->size - write_pos;
-        memcpy(rb->buffer + write_pos, &msg_len, first_chunk);
-        memcpy(rb->buffer, ((char*)&msg_len) + first_chunk, sizeof(uint32_t) - first_chunk);
-        write_pos = sizeof(uint32_t) - first_chunk;
-    } else {
-        // Write the length field
-        memcpy(rb->buffer + write_pos, &msg_len, sizeof(uint32_t));
-        write_pos += sizeof(uint32_t);
-        if (write_pos == rb->size) {
-            write_pos = 0;
-        }
-    }
-    
-    // Write the message data
-    if (write_pos + len > rb->size) {
-        // Wrap around for the data
-        size_t first_chunk = rb->size - write_pos;
-        memcpy(rb->buffer + write_pos, data, first_chunk);
-        memcpy(rb->buffer, (char*)data + first_chunk, len - first_chunk);
-        write_pos = len - first_chunk;
-    } else {
-        // Write the data
-        memcpy(rb->buffer + write_pos, data, len);
-        write_pos += len;
-        if (write_pos == rb->size) {
-            write_pos = 0;
-        }
-    }
-    
-    // Update the write position (memory barrier provided by atomic_store)
-    atomic_store(&rb->write_pos, write_pos);
-    
-    return true;
-}
-
-/* Read a message from the lock-free ring buffer */
-bool lfring_read(LockFreeRingBuffer* rb, void* data, size_t max_len, size_t* bytes_read) {
-    *bytes_read = 0;
-    
-    // Get current positions
-    size_t read_pos = atomic_load(&rb->read_pos);
-    size_t write_pos = atomic_load(&rb->write_pos);
-    
-    // Check if the buffer is empty
-    if (read_pos == write_pos) {
-        return false;
-    }
-    
-    // Read the message length first
-    uint32_t msg_len;
-    
-    if (read_pos + sizeof(uint32_t) > rb->size) {
-        // Wrap around for the length
-        size_t first_chunk = rb->size - read_pos;
-        memcpy(&msg_len, rb->buffer + read_pos, first_chunk);
-        memcpy(((char*)&msg_len) + first_chunk, rb->buffer, sizeof(uint32_t) - first_chunk);
-        read_pos = sizeof(uint32_t) - first_chunk;
-    } else {
-        // Read the length field
-        memcpy(&msg_len, rb->buffer + read_pos, sizeof(uint32_t));
-        read_pos += sizeof(uint32_t);
-        if (read_pos == rb->size) {
-            read_pos = 0;
-        }
-    }
-    
-    // Check if message fits in the provided buffer
-    if (msg_len > max_len) {
-        return false;
-    }
-    
-    // Read the message data
-    if (read_pos + msg_len > rb->size) {
-        // Wrap around for the data
-        size_t first_chunk = rb->size - read_pos;
-        memcpy(data, rb->buffer + read_pos, first_chunk);
-        memcpy((char*)data + first_chunk, rb->buffer, msg_len - first_chunk);
-        read_pos = msg_len - first_chunk;
-    } else {
-        // Read the data
-        memcpy(data, rb->buffer + read_pos, msg_len);
-        read_pos += msg_len;
-        if (read_pos == rb->size) {
-            read_pos = 0;
-        }
-    }
-    
-    // Update the read position (memory barrier provided by atomic_store)
-    atomic_store(&rb->read_pos, read_pos);
-    *bytes_read = msg_len;
-    
-    return true;
-}
-
-/* Run the Linux-optimized server benchmark */
-void run_lfshm_server(LockFreeRingBuffer* rb, int duration_secs) {
-    void* buffer = alloc_aligned_buffer(MAX_MSG_SIZE);
-    
-    // Start the benchmark
-    uint64_t start_time = get_timestamp_us();
-    uint64_t end_time = start_time + (duration_secs * 1000000ULL);
-    
-    while (get_timestamp_us() < end_time) {
-        // Wait for a message
-        while (get_timestamp_us() < end_time) {
-            size_t read_pos = atomic_load(&rb->read_pos);
-            size_t write_pos = atomic_load(&rb->write_pos);
-            
-            if (read_pos != write_pos) {
-                // Message available
-                break;
-            }
-            
-            // No message, wait on futex
-            uint32_t current_value = rb->server_futex;
-            futex_wait(&rb->server_futex, current_value);
-        }
-        
-        if (get_timestamp_us() >= end_time) break;
-        
-        // Read the message
-        size_t bytes_read;
-        if (lfring_read(rb, buffer, MAX_MSG_SIZE, &bytes_read)) {
-            // Process the message (just echo it back in this example)
-            Message* msg = (Message*)buffer;
-            
-            // Write the response
-            if (lfring_write(rb, buffer, msg->size)) {
-                // Wake up the client
-                rb->client_futex++;
-                futex_wake(&rb->client_futex, 1);
-            }
-        }
-    }
-    
-    // Cleanup
-    free(buffer);
-}
-
-/* Run the Linux-optimized client benchmark */
-void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
-    void* buffer = alloc_aligned_buffer(MAX_MSG_SIZE);
-    
-    uint64_t* latencies = malloc(sizeof(uint64_t) * MAX_LATENCIES);
-    size_t latency_count = 0;
-    
-    // Initialize the message
-    Message* msg = (Message*)buffer;
-    msg->seq = 0;
-    
-    // Record CPU usage at start
-    double cpu_start = get_cpu_usage();
-    
-    // Start warmup
-    uint64_t start_warmup = get_timestamp_us();
-    uint64_t end_warmup = start_warmup + (WARMUP_DURATION * 1000000ULL);
-    
-    // Send the first message (warmup)
-    random_message(msg, 2048, 4096);
-    if (lfring_write(rb, buffer, msg->size)) {
-        // Wake up the server
-        rb->server_futex++;
-        futex_wake(&rb->server_futex, 1);
-    }
-    
-    // Warmup phase
-    while (get_timestamp_us() < end_warmup) {
-        // Wait for a response
-        while (get_timestamp_us() < end_warmup) {
-            size_t read_pos = atomic_load(&rb->read_pos);
-            size_t write_pos = atomic_load(&rb->write_pos);
-            
-            if (read_pos != write_pos) {
-                // Response available
-                break;
-            }
-            
-            // No response, wait on futex
-            uint32_t current_value = rb->client_futex;
-            futex_wait(&rb->client_futex, current_value);
-        }
-        
-        if (get_timestamp_us() >= end_warmup) break;
-        
-        // Read the response
-        size_t bytes_read;
-        if (lfring_read(rb, buffer, MAX_MSG_SIZE, &bytes_read)) {
-            // Send the next message
-            random_message(msg, 2048, 4096);
-            if (lfring_write(rb, buffer, msg->size)) {
-                // Wake up the server
-                rb->server_futex++;
-                futex_wake(&rb->server_futex, 1);
-            }
-        }
-    }
-    
-    printf("Warmup completed, starting benchmark...\n");
-    
-    // Reset statistics
-    uint64_t ops = 0;
-    uint64_t bytes = 0;
-    
-    // Start the benchmark
-    uint64_t start_time = get_timestamp_us();
-    uint64_t end_time = start_time + (duration_secs * 1000000ULL);
-    
-    // Send the first message (benchmark)
-    random_message(msg, 2048, 4096);
-    msg->timestamp = get_timestamp_us();  // Set the timestamp for latency calculation
-    if (lfring_write(rb, buffer, msg->size)) {
-        // Wake up the server
-        rb->server_futex++;
-        futex_wake(&rb->server_futex, 1);
-    }
-    
-    while (get_timestamp_us() < end_time) {
-        // Wait for a response
-        while (get_timestamp_us() < end_time) {
-            size_t read_pos = atomic_load(&rb->read_pos);
-            size_t write_pos = atomic_load(&rb->write_pos);
-            
-            if (read_pos != write_pos) {
-                // Response available
-                break;
-            }
-            
-            // No response, wait on futex
-            uint32_t current_value = rb->client_futex;
-            futex_wait(&rb->client_futex, current_value);
-        }
-        
-        if (get_timestamp_us() >= end_time) break;
-        
-        // Read the response
-        size_t bytes_read;
-        if (lfring_read(rb, buffer, MAX_MSG_SIZE, &bytes_read)) {
-            // Calculate latency
-            uint64_t now = get_timestamp_us();
-            uint64_t latency = now - msg->timestamp;
-            
-            if (latency_count < MAX_LATENCIES) {
-                latencies[latency_count++] = latency;
-            }
-            
-            // Update statistics
-            ops++;
-            bytes += bytes_read;
-            
-            // Send the next message
-            random_message(msg, 2048, 4096);
-            msg->timestamp = get_timestamp_us();  // Update timestamp for next latency calculation
-            if (lfring_write(rb, buffer, msg->size)) {
-                // Wake up the server
-                rb->server_futex++;
-                futex_wake(&rb->server_futex, 1);
-            }
-        }
-    }
-    
-    // Record CPU usage
-    double cpu_end = get_cpu_usage();
-    double cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);  // Convert to percentage
-    
-    // Update stats
-    stats->ops = ops;
-    stats->bytes = bytes;
-    stats->cpu_usage = cpu_usage;
-    calculate_stats(latencies, latency_count, stats);
-    
-    // Cleanup
+#else
+    close(efd);
+    close(notif_write_fd);
+#endif
     free(buffer);
     free(latencies);
 }

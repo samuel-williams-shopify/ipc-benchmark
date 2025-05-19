@@ -1,0 +1,30 @@
+# Build artifacts
+ipc_benchmark
+*.o
+*.out
+*.a
+*.so
+*.dylib
+*.exe
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*~
+*.swp
+*.swo
+*.bak
+.vscode/
+.idea/
+
+# Shared memory and socket files
+/tmp/ipc_benchmark_socket
+/ipc_benchmark_shm
+
+# Logs
+*.log
+
+# Generated files
+*.dSYM/ 

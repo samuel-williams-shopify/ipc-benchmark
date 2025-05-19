@@ -818,7 +818,6 @@ RingBuffer* setup_shared_memory(size_t size, bool is_server) {
     size_t total_size;
     total_size = sizeof(RingBuffer) + size;
 
-#ifdef __APPLE__
     size_t page_size = getpagesize();
     total_size = (total_size + page_size - 1) & ~(page_size - 1);
     if (is_server) {
@@ -848,33 +847,7 @@ RingBuffer* setup_shared_memory(size_t size, bool is_server) {
             return NULL;
         }
     }
-#else
-    if (is_server) {
-        shm_unlink(SHM_NAME);
-        fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
-        if (fd == -1) {
-            perror("shm_open (server)");
-            return NULL;
-        }
-        if (ftruncate(fd, total_size) == -1) {
-            perror("ftruncate");
-            close(fd);
-            shm_unlink(SHM_NAME);
-            return NULL;
-        }
-    } else {
-        int retries = 10;
-        while (retries--) {
-            fd = shm_open(SHM_NAME, O_RDWR, 0666);
-            if (fd != -1) break;
-            sleep(1);
-        }
-        if (fd == -1) {
-            perror("shm_open (client)");
-            return NULL;
-        }
-    }
-#endif
+
     rb = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (rb == MAP_FAILED) {
         perror("mmap");

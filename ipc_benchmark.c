@@ -184,6 +184,16 @@ void run_lfshm_server(LockFreeRingBuffer* rb, int duration_secs);
 void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats* stats);
 #endif
 
+/* Allocate an aligned buffer for message data */
+void* alloc_aligned_buffer(size_t size) {
+    void* buffer;
+    if (posix_memalign(&buffer, 64, size) != 0) {
+        perror("posix_memalign");
+        return NULL;
+    }
+    return buffer;
+}
+
 /*
  * Main function - Parses command line and starts the appropriate benchmark
  */

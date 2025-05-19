@@ -3,15 +3,11 @@
  * 
  * This benchmark compares:
  * 1. Unix Domain Socket with io_uring
- * 2. Shared Memory with eventfd notification and io_uring
+ * 2. Shared Memory with pthread_mutex, dedicated thread and io_uring
  * 3. Linux-optimized implementation with futex and lock-free ring buffer
  * 
  * Compile with:
  * gcc -o ipc_benchmark ipc_benchmark.c -luring -lpthread -lrt -Wall -O2
- * 
- * Run as:
- * Server: ./ipc_benchmark --server --mode [uds|shm|lfshm]
- * Client: ./ipc_benchmark --client --mode [uds|shm|lfshm]
  */
 
 #define _GNU_SOURCE
@@ -79,6 +75,37 @@ typedef struct {
     double p99_latency_us;   // 99th percentile latency
 } BenchmarkStats;
 
+/* Shared memory ring buffer structure */
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t server_cond;
+    pthread_cond_t client_cond;
+    size_t read_pos;
+    size_t write_pos;
+    size_t size;
+    bool message_available;
+    bool response_available;
+    char buffer[0];  // Flexible array member for actual data
+} RingBuffer;
+
+/* Thread data structure for shared memory notification thread */
+typedef struct {
+    RingBuffer* rb;
+    int eventfd;
+    bool is_server;
+    volatile bool should_exit;
+} ThreadData;
+
+/* Lock-free ring buffer for Linux-optimized mode */
+typedef struct {
+    atomic_size_t read_pos;
+    atomic_size_t write_pos;
+    size_t size;
+    uint32_t server_futex; // For servers to wait on
+    uint32_t client_futex; // For clients to wait on
+    char buffer[0];
+} LockFreeRingBuffer;
+
 /* Function prototypes */
 
 // Utility functions
@@ -97,33 +124,16 @@ int setup_uds_client(const char* socket_path);
 void run_uds_server(int socket_fd, int duration_secs);
 void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats);
 
-// Mode 2: Shared Memory with eventfd and pthread_mutex
-typedef struct {
-    pthread_mutex_t mutex;
-    size_t read_pos;
-    size_t write_pos;
-    size_t size;
-    char buffer[0];  // Flexible array member for actual data
-} RingBuffer;
-
-int setup_shared_memory(size_t size);
-RingBuffer* map_shared_memory(int fd, size_t size);
-int setup_eventfd(void);
-bool ring_buffer_write(RingBuffer* rb, const void* data, size_t len);
+// Mode 2: Shared Memory with pthread_mutex, thread and eventfd
+RingBuffer* setup_shared_memory(size_t size);
+void* notification_thread(void* arg);
 bool ring_buffer_read(RingBuffer* rb, void* data, size_t max_len, size_t* bytes_read);
-void run_shm_server(RingBuffer* rb, int eventfd_read, int eventfd_write, int duration_secs);
-void run_shm_client(RingBuffer* rb, int eventfd_read, int eventfd_write, int duration_secs, BenchmarkStats* stats);
+bool ring_buffer_write_client_to_server(RingBuffer* rb, const void* data, size_t len);
+bool ring_buffer_write_server_to_client(RingBuffer* rb, const void* data, size_t len);
+void run_shm_server(RingBuffer* rb, int duration_secs);
+void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats);
 
 // Mode 3: Linux-optimized implementation with futex and lock-free ring buffer
-typedef struct {
-    atomic_size_t read_pos;
-    atomic_size_t write_pos;
-    size_t size;
-    uint32_t server_futex; // For servers to wait on
-    uint32_t client_futex; // For clients to wait on
-    char buffer[0];
-} LockFreeRingBuffer;
-
 LockFreeRingBuffer* setup_lockfree_shared_memory(size_t size);
 bool lfring_write(LockFreeRingBuffer* rb, const void* data, size_t len);
 bool lfring_read(LockFreeRingBuffer* rb, void* data, size_t max_len, size_t* bytes_read);
@@ -209,35 +219,39 @@ int main(int argc, char** argv) {
             print_stats(&stats, "Unix Domain Socket Results");
         }
     } else if (mode == MODE_SHM) {
-        printf("Mode: Shared Memory with eventfd and io_uring\n");
+        printf("Mode: Shared Memory with pthread_mutex and io_uring\n");
         
-        // Setup shared memory and eventfds
-        int shm_fd = setup_shared_memory(BUFFER_SIZE);
-        RingBuffer* rb = map_shared_memory(shm_fd, BUFFER_SIZE);
-        
-        int client_to_server_eventfd = setup_eventfd();
-        int server_to_client_eventfd = setup_eventfd();
+        // Setup shared memory
+        RingBuffer* rb = setup_shared_memory(BUFFER_SIZE);
+        if (!rb) {
+            fprintf(stderr, "Failed to setup shared memory\n");
+            return 1;
+        }
         
         if (is_server) {
             printf("Server running...\n");
-            run_shm_server(rb, client_to_server_eventfd, server_to_client_eventfd, RUN_DURATION);
+            run_shm_server(rb, RUN_DURATION);
         } else {
             printf("Client running...\n");
-            run_shm_client(rb, server_to_client_eventfd, client_to_server_eventfd, RUN_DURATION, &stats);
-            print_stats(&stats, "Shared Memory with eventfd Results");
+            run_shm_client(rb, RUN_DURATION, &stats);
+            print_stats(&stats, "Shared Memory with pthread_mutex Results");
         }
         
         // Cleanup
         munmap(rb, BUFFER_SIZE + sizeof(RingBuffer));
-        close(shm_fd);
-        close(client_to_server_eventfd);
-        close(server_to_client_eventfd);
+        if (is_server) {
+            shm_unlink(SHM_NAME);
+        }
         
     } else if (mode == MODE_LFSHM) {
         printf("Mode: Lock-free Shared Memory with futex\n");
         
         // Setup lockfree shared memory
         LockFreeRingBuffer* rb = setup_lockfree_shared_memory(BUFFER_SIZE);
+        if (!rb) {
+            fprintf(stderr, "Failed to setup lock-free shared memory\n");
+            return 1;
+        }
         
         if (is_server) {
             printf("Server running...\n");
@@ -250,7 +264,9 @@ int main(int argc, char** argv) {
         
         // Cleanup
         munmap(rb, BUFFER_SIZE + sizeof(LockFreeRingBuffer));
-        shm_unlink(SHM_NAME);
+        if (is_server) {
+            shm_unlink(SHM_NAME);
+        }
     }
 
     return 0;
@@ -345,6 +361,16 @@ void* alloc_aligned_buffer(size_t size) {
 /* Direct futex syscall wrapper */
 static inline long futex(uint32_t* uaddr, int futex_op, uint32_t val) {
     return syscall(SYS_futex, uaddr, futex_op, val, NULL, NULL, 0);
+}
+
+/* Wait on a futex */
+void futex_wait(uint32_t* uaddr, uint32_t val) {
+    futex(uaddr, FUTEX_WAIT, val);
+}
+
+/* Wake threads waiting on a futex */
+void futex_wake(uint32_t* uaddr, int count) {
+    futex(uaddr, FUTEX_WAKE, count);
 }
 
 /*
@@ -664,16 +690,16 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
 }
 
 /*
- * Mode 2: Shared Memory with eventfd and pthread_mutex
+ * Mode 2: Shared Memory with pthread_mutex, thread and eventfd
  */
 
-/* Create a shared memory region */
-int setup_shared_memory(size_t size) {
+/* Setup shared memory with pthread mutex and condition variables */
+RingBuffer* setup_shared_memory(size_t size) {
     // Create or open the shared memory object
     int fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
     if (fd == -1) {
         perror("shm_open");
-        return -1;
+        return NULL;
     }
     
     // Set the size of the shared memory object
@@ -681,48 +707,157 @@ int setup_shared_memory(size_t size) {
         perror("ftruncate");
         close(fd);
         shm_unlink(SHM_NAME);
-        return -1;
-    }
-    
-    return fd;
-}
-
-/* Map the shared memory region and initialize the ring buffer */
-RingBuffer* map_shared_memory(int fd, size_t size) {
-    // Map the shared memory object
-    RingBuffer* rb = mmap(NULL, sizeof(RingBuffer) + size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (rb == MAP_FAILED) {
-        perror("mmap");
         return NULL;
     }
     
-    // Initialize the ring buffer
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+    // Map the shared memory object
+    RingBuffer* rb = mmap(NULL, sizeof(RingBuffer) + size, 
+                         PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (rb == MAP_FAILED) {
+        perror("mmap");
+        close(fd);
+        shm_unlink(SHM_NAME);
+        return NULL;
+    }
     
-    pthread_mutex_init(&rb->mutex, &attr);
+    // Initialize pthread objects with process-shared attribute
+    pthread_mutexattr_t mutex_attr;
+    pthread_mutexattr_init(&mutex_attr);
+    pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
+    pthread_mutex_init(&rb->mutex, &mutex_attr);
+    pthread_mutexattr_destroy(&mutex_attr);
+    
+    pthread_condattr_t cond_attr;
+    pthread_condattr_init(&cond_attr);
+    pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
+    pthread_cond_init(&rb->server_cond, &cond_attr);
+    pthread_cond_init(&rb->client_cond, &cond_attr);
+    pthread_condattr_destroy(&cond_attr);
+    
+    // Initialize other fields
     rb->read_pos = 0;
     rb->write_pos = 0;
     rb->size = size;
+    rb->message_available = false;
+    rb->response_available = false;
     
-    pthread_mutexattr_destroy(&attr);
-    
+    close(fd);  // Keep mapped, but close the file descriptor
     return rb;
 }
 
-/* Create an eventfd for notification */
-int setup_eventfd(void) {
-    int efd = eventfd(0, EFD_CLOEXEC);
-    if (efd == -1) {
-        perror("eventfd");
-        return -1;
+/* Thread function that waits on mutex and signals eventfd */
+void* notification_thread(void* arg) {
+    ThreadData* data = (ThreadData*)arg;
+    RingBuffer* rb = data->rb;
+    
+    printf("%s thread started\n", data->is_server ? "Server" : "Client");
+    
+    while (!data->should_exit) {
+        pthread_mutex_lock(&rb->mutex);
+        
+        // Server thread waits for message_available
+        // Client thread waits for response_available
+        if (data->is_server) {
+            while (!rb->message_available && !data->should_exit) {
+                printf("Server thread waiting for message\n");
+                pthread_cond_wait(&rb->server_cond, &rb->mutex);
+                printf("Server thread woke up\n");
+            }
+            
+            if (rb->message_available && !data->should_exit) {
+                rb->message_available = false;
+                // Signal the eventfd to wake up the io_uring event loop
+                uint64_t val = 1;
+                if (write(data->eventfd, &val, sizeof(val)) != sizeof(val)) {
+                    perror("write eventfd");
+                }
+                printf("Server thread signaled eventfd\n");
+            }
+        } else {
+            while (!rb->response_available && !data->should_exit) {
+                printf("Client thread waiting for response\n");
+                pthread_cond_wait(&rb->client_cond, &rb->mutex);
+                printf("Client thread woke up\n");
+            }
+            
+            if (rb->response_available && !data->should_exit) {
+                rb->response_available = false;
+                // Signal the eventfd to wake up the io_uring event loop
+                uint64_t val = 1;
+                if (write(data->eventfd, &val, sizeof(val)) != sizeof(val)) {
+                    perror("write eventfd");
+                }
+                printf("Client thread signaled eventfd\n");
+            }
+        }
+        
+        pthread_mutex_unlock(&rb->mutex);
     }
-    return efd;
+    
+    printf("%s thread exiting\n", data->is_server ? "Server" : "Client");
+    return NULL;
 }
 
-/* Write a message to the ring buffer */
-bool ring_buffer_write(RingBuffer* rb, const void* data, size_t len) {
+/* Read a message from the ring buffer */
+bool ring_buffer_read(RingBuffer* rb, void* data, size_t max_len, size_t* bytes_read) {
+    *bytes_read = 0;
+    
+    // We assume the mutex is already locked by the caller
+    
+    // Check if the buffer is empty
+    if (rb->read_pos == rb->write_pos) {
+        return false;
+    }
+    
+    // Read the message length first
+    uint32_t msg_len;
+    size_t read_pos = rb->read_pos;
+    
+    if (read_pos + sizeof(uint32_t) > rb->size) {
+        // Wrap around for the length
+        size_t first_chunk = rb->size - read_pos;
+        memcpy(&msg_len, rb->buffer + read_pos, first_chunk);
+        memcpy(((char*)&msg_len) + first_chunk, rb->buffer, sizeof(uint32_t) - first_chunk);
+        read_pos = sizeof(uint32_t) - first_chunk;
+    } else {
+        // Read the length field
+        memcpy(&msg_len, rb->buffer + read_pos, sizeof(uint32_t));
+        read_pos += sizeof(uint32_t);
+        if (read_pos == rb->size) {
+            read_pos = 0;
+        }
+    }
+    
+    // Check if message fits in the provided buffer
+    if (msg_len > max_len) {
+        return false;
+    }
+    
+    // Read the message data
+    if (read_pos + msg_len > rb->size) {
+        // Wrap around for the data
+        size_t first_chunk = rb->size - read_pos;
+        memcpy(data, rb->buffer + read_pos, first_chunk);
+        memcpy((char*)data + first_chunk, rb->buffer, msg_len - first_chunk);
+        read_pos = msg_len - first_chunk;
+    } else {
+        // Read the data
+        memcpy(data, rb->buffer + read_pos, msg_len);
+        read_pos += msg_len;
+        if (read_pos == rb->size) {
+            read_pos = 0;
+        }
+    }
+    
+    // Update the read position
+    rb->read_pos = read_pos;
+    *bytes_read = msg_len;
+    
+    return true;
+}
+
+/* Write a message from client to server */
+bool ring_buffer_write_client_to_server(RingBuffer* rb, const void* data, size_t len) {
     if (len > rb->size / 2) {
         // Prevent a single message from taking more than half the buffer
         return false;
@@ -782,80 +917,118 @@ bool ring_buffer_write(RingBuffer* rb, const void* data, size_t len) {
     // Update the write position
     rb->write_pos = write_pos;
     
+    // Signal that a message is available
+    rb->message_available = true;
+    pthread_cond_signal(&rb->server_cond);
+    
     pthread_mutex_unlock(&rb->mutex);
     return true;
 }
 
-/* Read a message from the ring buffer */
-bool ring_buffer_read(RingBuffer* rb, void* data, size_t max_len, size_t* bytes_read) {
-    *bytes_read = 0;
+/* Write a message from server to client */
+bool ring_buffer_write_server_to_client(RingBuffer* rb, const void* data, size_t len) {
+    if (len > rb->size / 2) {
+        // Prevent a single message from taking more than half the buffer
+        return false;
+    }
     
     pthread_mutex_lock(&rb->mutex);
     
-    // Check if the buffer is empty
-    if (rb->read_pos == rb->write_pos) {
+    // Calculate available space
+    size_t available;
+    if (rb->write_pos >= rb->read_pos) {
+        available = rb->size - (rb->write_pos - rb->read_pos);
+    } else {
+        available = rb->read_pos - rb->write_pos;
+    }
+    
+    // Check if there's enough space (reserving 1 byte to distinguish empty from full)
+    if (available <= len + sizeof(uint32_t) + 1) {
         pthread_mutex_unlock(&rb->mutex);
         return false;
     }
     
-    // Read the message length first
-    uint32_t msg_len;
-    size_t read_pos = rb->read_pos;
+    // Write the message length first
+    uint32_t msg_len = len;
+    size_t write_pos = rb->write_pos;
     
-    if (read_pos + sizeof(uint32_t) > rb->size) {
+    if (write_pos + sizeof(uint32_t) > rb->size) {
         // Wrap around for the length
-        size_t first_chunk = rb->size - read_pos;
-        memcpy(&msg_len, rb->buffer + read_pos, first_chunk);
-        memcpy(((char*)&msg_len) + first_chunk, rb->buffer, sizeof(uint32_t) - first_chunk);
-        read_pos = sizeof(uint32_t) - first_chunk;
+        size_t first_chunk = rb->size - write_pos;
+        memcpy(rb->buffer + write_pos, &msg_len, first_chunk);
+        memcpy(rb->buffer, ((char*)&msg_len) + first_chunk, sizeof(uint32_t) - first_chunk);
+        write_pos = sizeof(uint32_t) - first_chunk;
     } else {
-        // Read the length field
-        memcpy(&msg_len, rb->buffer + read_pos, sizeof(uint32_t));
-        read_pos += sizeof(uint32_t);
-        if (read_pos == rb->size) {
-            read_pos = 0;
+        // Write the length field
+        memcpy(rb->buffer + write_pos, &msg_len, sizeof(uint32_t));
+        write_pos += sizeof(uint32_t);
+        if (write_pos == rb->size) {
+            write_pos = 0;
         }
     }
     
-    // Check if message fits in the provided buffer
-    if (msg_len > max_len) {
-        pthread_mutex_unlock(&rb->mutex);
-        return false;
-    }
-    
-    // Read the message data
-    if (read_pos + msg_len > rb->size) {
+    // Write the message data
+    if (write_pos + len > rb->size) {
         // Wrap around for the data
-        size_t first_chunk = rb->size - read_pos;
-        memcpy(data, rb->buffer + read_pos, first_chunk);
-        memcpy((char*)data + first_chunk, rb->buffer, msg_len - first_chunk);
-        read_pos = msg_len - first_chunk;
+        size_t first_chunk = rb->size - write_pos;
+        memcpy(rb->buffer + write_pos, data, first_chunk);
+        memcpy(rb->buffer, (char*)data + first_chunk, len - first_chunk);
+        write_pos = len - first_chunk;
     } else {
-        // Read the data
-        memcpy(data, rb->buffer + read_pos, msg_len);
-        read_pos += msg_len;
-        if (read_pos == rb->size) {
-            read_pos = 0;
+        // Write the data
+        memcpy(rb->buffer + write_pos, data, len);
+        write_pos += len;
+        if (write_pos == rb->size) {
+            write_pos = 0;
         }
     }
     
-    // Update the read position
-    rb->read_pos = read_pos;
-    *bytes_read = msg_len;
+    // Update the write position
+    rb->write_pos = write_pos;
+    
+    // Signal that a response is available
+    rb->response_available = true;
+    pthread_cond_signal(&rb->client_cond);
     
     pthread_mutex_unlock(&rb->mutex);
     return true;
 }
 
 /* Run the Shared Memory server benchmark */
-void run_shm_server(RingBuffer* rb, int eventfd_read, int eventfd_write, int duration_secs) {
+void run_shm_server(RingBuffer* rb, int duration_secs) {
     struct io_uring ring;
     void* buffer = alloc_aligned_buffer(MAX_MSG_SIZE);
     uint64_t eventfd_buffer = 0;
     
+    // Create local eventfd for notification
+    int efd = eventfd(0, EFD_CLOEXEC);
+    if (efd == -1) {
+        perror("eventfd");
+        free(buffer);
+        return;
+    }
+    
     // Initialize io_uring
     if (io_uring_queue_init(QUEUE_DEPTH, &ring, 0) < 0) {
         perror("io_uring_queue_init");
+        close(efd);
+        free(buffer);
+        return;
+    }
+    
+    // Start notification thread
+    ThreadData thread_data = {
+        .rb = rb,
+        .eventfd = efd,
+        .is_server = true,
+        .should_exit = false
+    };
+    
+    pthread_t notif_thread;
+    if (pthread_create(&notif_thread, NULL, notification_thread, &thread_data) != 0) {
+        perror("pthread_create");
+        io_uring_queue_exit(&ring);
+        close(efd);
         free(buffer);
         return;
     }
@@ -866,9 +1039,11 @@ void run_shm_server(RingBuffer* rb, int eventfd_read, int eventfd_write, int dur
     
     // Submit the first eventfd read
     struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_read(sqe, eventfd_read, &eventfd_buffer, sizeof(eventfd_buffer), 0);
+    io_uring_prep_read(sqe, efd, &eventfd_buffer, sizeof(eventfd_buffer), 0);
     sqe->user_data = 1;  // Mark as eventfd read operation
     io_uring_submit(&ring);
+    
+    printf("Server ready to process messages\n");
     
     while (get_timestamp_us() < end_time) {
         struct io_uring_cqe* cqe;
@@ -881,61 +1056,102 @@ void run_shm_server(RingBuffer* rb, int eventfd_read, int eventfd_write, int dur
         }
         
         // Process the completion
-        if (cqe->user_data == 1) {  // eventfd read completed
-            if (cqe->res <= 0) {
-                // Error
-                io_uring_cqe_seen(&ring, cqe);
-                break;
-            }
-            
-            // Read the message from the ring buffer
-            size_t bytes_read;
-            if (ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &bytes_read)) {
-                // Process the message (just echo it back in this example)
-                Message* msg = (Message*)buffer;
+        if (cqe->user_data == 1) {  // eventfd notification
+            if (cqe->res > 0) {
+                printf("Server received eventfd notification\n");
                 
-                // Write the response to the ring buffer
-                if (ring_buffer_write(rb, buffer, msg->size)) {
-                    // Notify the client
-                    uint64_t val = 1;
-                    sqe = io_uring_get_sqe(&ring);
-                    io_uring_prep_write(sqe, eventfd_write, &val, sizeof(val), 0);
-                    sqe->user_data = 2;  // Mark as eventfd write operation
-                    io_uring_submit(&ring);
+                // Read message from the ring buffer
+                size_t bytes_read;
+                pthread_mutex_lock(&rb->mutex);
+                bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &bytes_read);
+                pthread_mutex_unlock(&rb->mutex);
+                
+                if (read_success) {
+                    printf("Server read message: %zu bytes\n", bytes_read);
+                    
+                    // Process the message (echo it back)
+                    Message* msg = (Message*)buffer;
+                    
+                    // Write response back
+                    if (ring_buffer_write_server_to_client(rb, buffer, msg->size)) {
+                        printf("Server wrote response\n");
+                    } else {
+                        printf("Server failed to write response\n");
+                    }
+                } else {
+                    printf("Server failed to read message\n");
                 }
+            } else {
+                printf("Server got eventfd read error: %d\n", cqe->res);
             }
             
-            // Submit another eventfd read
+            // Resubmit eventfd read
             eventfd_buffer = 0;  // Reset buffer
             sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_read(sqe, eventfd_read, &eventfd_buffer, sizeof(eventfd_buffer), 0);
+            io_uring_prep_read(sqe, efd, &eventfd_buffer, sizeof(eventfd_buffer), 0);
             sqe->user_data = 1;  // Mark as eventfd read operation
             io_uring_submit(&ring);
-            
-        } else if (cqe->user_data == 2) {  // eventfd write completed
-            // No special handling needed, we already submitted a new read
         }
         
         io_uring_cqe_seen(&ring, cqe);
     }
     
+    // Signal thread to exit
+    thread_data.should_exit = true;
+    pthread_mutex_lock(&rb->mutex);
+    pthread_cond_signal(&rb->server_cond);  // Wake up the thread
+    pthread_mutex_unlock(&rb->mutex);
+    
+    pthread_join(notif_thread, NULL);
+    printf("Server notification thread joined\n");
+    
     // Cleanup
     io_uring_queue_exit(&ring);
+    close(efd);
     free(buffer);
 }
 
 /* Run the Shared Memory client benchmark */
-void run_shm_client(RingBuffer* rb, int eventfd_read, int eventfd_write, int duration_secs, BenchmarkStats* stats) {
+void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
     struct io_uring ring;
     void* buffer = alloc_aligned_buffer(MAX_MSG_SIZE);
+    memset(buffer, 0, MAX_MSG_SIZE);
     uint64_t eventfd_buffer = 0;
     
     uint64_t* latencies = malloc(sizeof(uint64_t) * MAX_LATENCIES);
     size_t latency_count = 0;
     
+    // Create local eventfd for notification
+    int efd = eventfd(0, EFD_CLOEXEC);
+    if (efd == -1) {
+        perror("eventfd");
+        free(buffer);
+        free(latencies);
+        return;
+    }
+    
     // Initialize io_uring
     if (io_uring_queue_init(QUEUE_DEPTH, &ring, 0) < 0) {
         perror("io_uring_queue_init");
+        close(efd);
+        free(buffer);
+        free(latencies);
+        return;
+    }
+    
+    // Start notification thread
+    ThreadData thread_data = {
+        .rb = rb,
+        .eventfd = efd,
+        .is_server = false,
+        .should_exit = false
+    };
+    
+    pthread_t notif_thread;
+    if (pthread_create(&notif_thread, NULL, notification_thread, &thread_data) != 0) {
+        perror("pthread_create");
+        io_uring_queue_exit(&ring);
+        close(efd);
         free(buffer);
         free(latencies);
         return;
@@ -954,26 +1170,19 @@ void run_shm_client(RingBuffer* rb, int eventfd_read, int eventfd_write, int dur
     
     // Send the first message (warmup)
     random_message(msg, 2048, 4096);
-    if (!ring_buffer_write(rb, buffer, msg->size)) {
+    printf("Client sending first message\n");
+    if (!ring_buffer_write_client_to_server(rb, buffer, msg->size)) {
         fprintf(stderr, "Failed to write message to ring buffer\n");
-        free(buffer);
-        free(latencies);
-        io_uring_queue_exit(&ring);
-        return;
+        goto cleanup;
     }
     
-    // Notify the server
-    uint64_t val = 1;
+    // Submit the first eventfd read
     struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_write(sqe, eventfd_write, &val, sizeof(val), 0);
-    sqe->user_data = 2;  // Mark as eventfd write operation
-    io_uring_submit(&ring);
-    
-    // Submit the first eventfd read (for server's response)
-    sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_read(sqe, eventfd_read, &eventfd_buffer, sizeof(eventfd_buffer), 0);
+    io_uring_prep_read(sqe, efd, &eventfd_buffer, sizeof(eventfd_buffer), 0);
     sqe->user_data = 1;  // Mark as eventfd read operation
     io_uring_submit(&ring);
+    
+    printf("Client warmup phase starting\n");
     
     // Warmup phase
     while (get_timestamp_us() < end_warmup) {
@@ -987,32 +1196,37 @@ void run_shm_client(RingBuffer* rb, int eventfd_read, int eventfd_write, int dur
         }
         
         // Process the completion
-        if (cqe->user_data == 1) {  // eventfd read (server notified us)
-            if (cqe->res <= 0) {
-                // Error
-                io_uring_cqe_seen(&ring, cqe);
-                break;
-            }
-            
-            // Read the response from the ring buffer
-            size_t bytes_read;
-            if (ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &bytes_read)) {
-                // Send the next message
-                random_message(msg, 2048, 4096);
-                if (ring_buffer_write(rb, buffer, msg->size)) {
-                    // Notify the server
-                    uint64_t val = 1;
-                    sqe = io_uring_get_sqe(&ring);
-                    io_uring_prep_write(sqe, eventfd_write, &val, sizeof(val), 0);
-                    sqe->user_data = 2;  // Mark as eventfd write operation
-                    io_uring_submit(&ring);
+        if (cqe->user_data == 1) {  // eventfd notification
+            if (cqe->res > 0) {
+                printf("Client received eventfd notification\n");
+                
+                // Read response from ring buffer
+                size_t bytes_read;
+                pthread_mutex_lock(&rb->mutex);
+                bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &bytes_read);
+                pthread_mutex_unlock(&rb->mutex);
+                
+                if (read_success) {
+                    printf("Client read response: %zu bytes\n", bytes_read);
+                    
+                    // Send the next message
+                    random_message(msg, 2048, 4096);
+                    if (ring_buffer_write_client_to_server(rb, buffer, msg->size)) {
+                        printf("Client wrote next message\n");
+                    } else {
+                        printf("Client failed to write next message\n");
+                    }
+                } else {
+                    printf("Client failed to read response\n");
                 }
+            } else {
+                printf("Client got eventfd read error: %d\n", cqe->res);
             }
             
-            // Submit another eventfd read
+            // Resubmit eventfd read
             eventfd_buffer = 0;  // Reset buffer
             sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_read(sqe, eventfd_read, &eventfd_buffer, sizeof(eventfd_buffer), 0);
+            io_uring_prep_read(sqe, efd, &eventfd_buffer, sizeof(eventfd_buffer), 0);
             sqe->user_data = 1;  // Mark as eventfd read operation
             io_uring_submit(&ring);
         }
@@ -1033,21 +1247,12 @@ void run_shm_client(RingBuffer* rb, int eventfd_read, int eventfd_write, int dur
     // Send the first message (benchmark)
     random_message(msg, 2048, 4096);
     msg->timestamp = get_timestamp_us();  // Set the timestamp for latency calculation
-    if (!ring_buffer_write(rb, buffer, msg->size)) {
+    if (!ring_buffer_write_client_to_server(rb, buffer, msg->size)) {
         fprintf(stderr, "Failed to write message to ring buffer\n");
-        free(buffer);
-        free(latencies);
-        io_uring_queue_exit(&ring);
-        return;
+        goto cleanup;
     }
     
-    // Notify the server
-    val = 1;
-    sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_write(sqe, eventfd_write, &val, sizeof(val), 0);
-    sqe->user_data = 2;  // Mark as eventfd write operation
-    io_uring_submit(&ring);
-    
+    // Benchmark phase
     while (get_timestamp_us() < end_time) {
         struct io_uring_cqe* cqe;
         
@@ -1059,45 +1264,38 @@ void run_shm_client(RingBuffer* rb, int eventfd_read, int eventfd_write, int dur
         }
         
         // Process the completion
-        if (cqe->user_data == 1) {  // eventfd read (server notified us)
-            if (cqe->res <= 0) {
-                // Error
-                io_uring_cqe_seen(&ring, cqe);
-                break;
-            }
-            
-            // Read the response from the ring buffer
-            size_t bytes_read;
-            if (ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &bytes_read)) {
-                // Calculate latency
-                uint64_t now = get_timestamp_us();
-                uint64_t latency = now - msg->timestamp;
+        if (cqe->user_data == 1) {  // eventfd notification
+            if (cqe->res > 0) {
+                // Read response from ring buffer
+                size_t bytes_read;
+                pthread_mutex_lock(&rb->mutex);
+                bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &bytes_read);
+                pthread_mutex_unlock(&rb->mutex);
                 
-                if (latency_count < MAX_LATENCIES) {
-                    latencies[latency_count++] = latency;
-                }
-                
-                // Update statistics
-                ops++;
-                bytes += bytes_read;
-                
-                // Send the next message
-                random_message(msg, 2048, 4096);
-                msg->timestamp = get_timestamp_us();  // Update timestamp for next latency calculation
-                if (ring_buffer_write(rb, buffer, msg->size)) {
-                    // Notify the server
-                    uint64_t val = 1;
-                    sqe = io_uring_get_sqe(&ring);
-                    io_uring_prep_write(sqe, eventfd_write, &val, sizeof(val), 0);
-                    sqe->user_data = 2;  // Mark as eventfd write operation
-                    io_uring_submit(&ring);
+                if (read_success) {
+                    // Calculate latency
+                    uint64_t now = get_timestamp_us();
+                    uint64_t latency = now - msg->timestamp;
+                    
+                    if (latency_count < MAX_LATENCIES) {
+                        latencies[latency_count++] = latency;
+                    }
+                    
+                    // Update statistics
+                    ops++;
+                    bytes += bytes_read;
+                    
+                    // Send the next message
+                    random_message(msg, 2048, 4096);
+                    msg->timestamp = get_timestamp_us();  // Update timestamp for next latency calculation
+                    ring_buffer_write_client_to_server(rb, buffer, msg->size);
                 }
             }
             
-            // Submit another eventfd read
+            // Resubmit eventfd read
             eventfd_buffer = 0;  // Reset buffer
             sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_read(sqe, eventfd_read, &eventfd_buffer, sizeof(eventfd_buffer), 0);
+            io_uring_prep_read(sqe, efd, &eventfd_buffer, sizeof(eventfd_buffer), 0);
             sqe->user_data = 1;  // Mark as eventfd read operation
             io_uring_submit(&ring);
         }
@@ -1115,8 +1313,19 @@ void run_shm_client(RingBuffer* rb, int eventfd_read, int eventfd_write, int dur
     stats->cpu_usage = cpu_usage;
     calculate_stats(latencies, latency_count, stats);
     
+cleanup:
+    // Signal thread to exit
+    thread_data.should_exit = true;
+    pthread_mutex_lock(&rb->mutex);
+    pthread_cond_signal(&rb->client_cond);  // Wake up the thread
+    pthread_mutex_unlock(&rb->mutex);
+    
+    pthread_join(notif_thread, NULL);
+    printf("Client notification thread joined\n");
+    
     // Cleanup
     io_uring_queue_exit(&ring);
+    close(efd);
     free(buffer);
     free(latencies);
 }
@@ -1163,16 +1372,6 @@ LockFreeRingBuffer* setup_lockfree_shared_memory(size_t size) {
     close(fd);
     
     return rb;
-}
-
-/* Wait on a futex */
-void futex_wait(uint32_t* uaddr, uint32_t val) {
-    futex(uaddr, FUTEX_WAIT, val, NULL, NULL, 0);
-}
-
-/* Wake threads waiting on a futex */
-void futex_wake(uint32_t* uaddr, int count) {
-    futex(uaddr, FUTEX_WAKE, count, NULL, NULL, 0);
 }
 
 /* Write a message to the lock-free ring buffer */

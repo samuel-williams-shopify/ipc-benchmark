@@ -12,7 +12,7 @@
 
 /* Setup lock-free shared memory */
 LockFreeRingBuffer* setup_lockfree_shared_memory(size_t size) {
-    int fd;
+    int fd = -1;
     LockFreeRingBuffer* rb = NULL;
     size_t total_size = sizeof(LockFreeRingBuffer) + size;
 
@@ -221,12 +221,14 @@ void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats*
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
+        munmap(rb, sizeof(LockFreeRingBuffer) + BUFFER_SIZE);
         return;
     }
     uint64_t* latencies = malloc(sizeof(uint64_t) * MAX_LATENCIES);
     if (!latencies) {
         perror("malloc");
         free(buffer);
+        munmap(rb, sizeof(LockFreeRingBuffer) + BUFFER_SIZE);
         return;
     }
     size_t latency_count = 0;

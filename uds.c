@@ -12,6 +12,9 @@
 
 /* Setup a server-side Unix domain socket */
 int setup_uds_server(const char* socket_path) {
+    // Remove any existing socket file
+    unlink(socket_path);
+    
     int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server_fd == -1) {
         perror("socket");
@@ -26,12 +29,14 @@ int setup_uds_server(const char* socket_path) {
     if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
         perror("bind");
         close(server_fd);
+        unlink(socket_path);
         return -1;
     }
     
     if (listen(server_fd, 5) == -1) {
         perror("listen");
         close(server_fd);
+        unlink(socket_path);
         return -1;
     }
     
@@ -40,6 +45,7 @@ int setup_uds_server(const char* socket_path) {
     if (client_fd == -1) {
         perror("accept");
         close(server_fd);
+        unlink(socket_path);
         return -1;
     }
     
@@ -162,6 +168,8 @@ void run_uds_server(int socket_fd, int duration_secs) {
     }
     
     free(buffer);
+    close(socket_fd);
+    unlink(SOCKET_PATH);
 }
 
 /* Run the Unix Domain Socket client benchmark */
@@ -355,4 +363,5 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
     // Cleanup
     free(buffer);
     free(latencies);
+    close(socket_fd);
 } 

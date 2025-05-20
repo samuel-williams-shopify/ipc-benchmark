@@ -260,7 +260,7 @@ static bool ring_buffer_write_server_to_client(RingBuffer* rb, const void* data,
 
 /* Setup shared memory with pthread mutex and condition variables */
 RingBuffer* setup_shared_memory(size_t size, bool is_server) {
-    int fd;
+    int fd = -1;
     RingBuffer* rb = NULL;
     size_t total_size;
     total_size = sizeof(RingBuffer) + size;
@@ -311,6 +311,7 @@ RingBuffer* setup_shared_memory(size_t size, bool is_server) {
             munmap(rb, total_size);
             close(fd);
             shm_unlink(SHM_NAME);
+            pthread_mutexattr_destroy(&mutex_attr);
             return NULL;
         }
         pthread_mutexattr_destroy(&mutex_attr);
@@ -324,6 +325,7 @@ RingBuffer* setup_shared_memory(size_t size, bool is_server) {
             munmap(rb, total_size);
             close(fd);
             shm_unlink(SHM_NAME);
+            pthread_condattr_destroy(&cond_attr);
             return NULL;
         }
         pthread_condattr_destroy(&cond_attr);
@@ -473,12 +475,14 @@ void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
+        munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
         return;
     }
     uint64_t* latencies = malloc(sizeof(uint64_t) * MAX_LATENCIES);
     if (!latencies) {
         perror("malloc");
         free(buffer);
+        munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
         return;
     }
     size_t latency_count = 0;
@@ -488,6 +492,7 @@ void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
     if (!intr) {
         free(buffer);
         free(latencies);
+        munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
         return;
     }
 
@@ -504,6 +509,7 @@ void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
         interrupt_destroy(intr);
         free(buffer);
         free(latencies);
+        munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
         return;
     }
 

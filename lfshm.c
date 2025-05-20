@@ -212,6 +212,8 @@ void run_lfshm_server(LockFreeRingBuffer* rb, int duration_secs) {
     
     // Cleanup
     free(buffer);
+    munmap(rb, sizeof(LockFreeRingBuffer) + BUFFER_SIZE);
+    shm_unlink(SHM_NAME);
 }
 
 /* Run the Lock-free Shared Memory client benchmark */
@@ -340,9 +342,10 @@ void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats*
         printf("\nBenchmark completed successfully.\n");
     }
 
+    double cpu_end;
 cleanup:    
     // Record CPU usage
-    double cpu_end = get_cpu_usage();
+    cpu_end = get_cpu_usage();
     stats->cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);
 
     // Calculate final statistics
@@ -351,4 +354,5 @@ cleanup:
     // Cleanup resources
     free(buffer);
     free(latencies);
+    munmap(rb, sizeof(LockFreeRingBuffer) + BUFFER_SIZE);
 } 

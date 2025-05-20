@@ -454,10 +454,12 @@ void run_shm_server(RingBuffer* rb, int duration_secs) {
     // Cleanup
     interrupt_destroy(intr);
     free(buffer);
+    munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
+    shm_unlink(SHM_NAME);
 
     // Print timing metrics at the end
     printf("\nDetailed Timing Metrics:\n");
-    printf("Total Operations: %lu\n", rb->total_ops);
+    printf("Total Operations: %llu\n", rb->total_ops);
     printf("Average Mutex Lock Time: %.2f µs\n", (double)rb->mutex_lock_time / rb->total_ops);
     printf("Average Condition Wait Time: %.2f µs\n", (double)rb->cond_wait_time / rb->total_ops);
     printf("Average Notification Time: %.2f µs\n", (double)rb->notify_time / rb->total_ops);
@@ -666,7 +668,7 @@ void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
 
     // Print timing metrics at the end
     printf("\nDetailed Timing Metrics:\n");
-    printf("Total Operations: %lu\n", rb->total_ops);
+    printf("Total Operations: %llu\n", rb->total_ops);
     printf("Average Mutex Lock Time: %.2f µs\n", (double)rb->mutex_lock_time / rb->total_ops);
     printf("Average Condition Wait Time: %.2f µs\n", (double)rb->cond_wait_time / rb->total_ops);
     printf("Average Notification Time: %.2f µs\n", (double)rb->notify_time / rb->total_ops);
@@ -674,9 +676,10 @@ void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
     printf("Total Synchronization Overhead: %.2f µs\n", 
            (double)(rb->mutex_lock_time + rb->cond_wait_time + rb->notify_time) / rb->total_ops);
 
+    double cpu_end;
 cleanup:    
     // Record CPU usage
-    double cpu_end = get_cpu_usage();
+    cpu_end = get_cpu_usage();
     stats->cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);
 
     // Calculate final statistics
@@ -686,4 +689,5 @@ cleanup:
     interrupt_destroy(intr);
     free(buffer);
     free(latencies);
+    munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
 } 

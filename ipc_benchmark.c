@@ -42,23 +42,6 @@
 #define HAVE_FUTEX 1
 #endif
 
-/* For compatibility with older headers */
-#ifndef MFD_CLOEXEC
-#define MFD_CLOEXEC 0x0001U
-#endif
-
-/* Configuration constants */
-#define SOCKET_PATH "/tmp/ipc_benchmark_socket"
-#define SHM_NAME "/ipc_benchmark_shm"
-#define MAX_MSG_SIZE (128 * 1024)  // 128KiB max message size
-#define BUFFER_SIZE (4 * 1024 * 1024)  // 4MiB ring buffer
-#define WARMUP_DURATION 1  // Warmup duration in seconds
-#define RUN_DURATION 10     // Benchmark duration in seconds
-#define MAX_LATENCIES 1000000  // Maximum number of latency measurements
-
-#define MAGIC_START 0xDEADBEEF
-#define MAGIC_END   0xCAFEBABE
-
 /* Forward declarations of structures */
 typedef struct RingBuffer RingBuffer;
 typedef struct ThreadData ThreadData;

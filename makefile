@@ -1,6 +1,6 @@
 # Compiler and flags
 CC := gcc
-CFLAGS := -Wall -O2
+CFLAGS := -Wall -Wextra -O2 -pthread
 
 # Detect operating system
 UNAME_S := $(shell uname -s)
@@ -16,7 +16,7 @@ endif
 TARGET := ipc_benchmark
 
 # Source files
-SRC := ipc_benchmark.c
+SRC := ipc_benchmark.c uds.c shm.c lfshm.c benchmark.c interrupt.c
 OBJ := $(SRC:.c=.o)
 
 # Default target
@@ -24,7 +24,7 @@ all: $(TARGET)
 
 # Link the executable
 $(TARGET): $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(OBJ) -o $(TARGET) $(LDFLAGS)
 
 # Compile source files
 %.o: %.c
@@ -81,4 +81,4 @@ ifeq ($(UNAME_S),Linux)
 endif
 	@echo "  run-all   - Run all benchmarks sequentially"
 
-.PHONY: all clean run-uds run-shm run-lfshm run-all help
+.PHONY: all clean run-uds run-shm run-lfshm run-all help   

@@ -1,6 +1,48 @@
 # IPC Benchmark
 
-A performance comparison of different Inter-Process Communication (IPC) mechanisms.
+This project benchmarks different IPC mechanisms:
+1. Unix Domain Socket with select()
+2. Shared Memory with pthread_mutex and dedicated thread
+3. Linux-optimized implementation with futex and lock-free ring buffer
+
+## Build and Run
+
+To build the project, run:
+```
+make
+```
+
+To run the benchmarks, use:
+```
+make run-uds  # Unix Domain Socket
+make run-shm  # Shared Memory
+make run-lfshm  # Lock-free Shared Memory (Linux only)
+```
+
+## Benchmark Results
+
+### Unix Domain Socket (UDS)
+- Operations per second: 63,437.10
+- Throughput: 187.91 MiB/s
+- CPU usage: 67.44%
+- Average latency: 9.01 µs
+- P50 latency: 9.00 µs
+- P95 latency: 11.00 µs
+- P99 latency: 16.00 µs
+
+### Shared Memory (SHM)
+- Operations per second: 34,355.40
+- Throughput: 101.76 MiB/s
+- CPU usage: 54.68%
+- Average latency: 16.17 µs
+- P50 latency: 16.00 µs
+- P95 latency: 22.00 µs
+- P99 latency: 27.00 µs
+
+### Comparison
+- UDS outperforms SHM in throughput and latency due to kernel-level optimizations and efficient buffering.
+- SHM has lower CPU usage but higher latency due to synchronization overhead (mutex locks, condition variables, and notification handling).
+- The lock-free implementation (Linux only) may offer better performance than SHM by reducing synchronization overhead.
 
 ## Overview
 

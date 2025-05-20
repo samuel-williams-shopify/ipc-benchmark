@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 
 #include "interrupt.h"
 #include "benchmark.h"
@@ -40,6 +41,8 @@ int main(int argc, char* argv[]) {
     bool is_client = false;
     const char* mode = NULL;
     int duration_secs = RUN_DURATION;
+
+    signal(SIGPIPE, SIG_IGN);
 
     static struct option long_options[] = {
         {"server", no_argument, 0, 's'},

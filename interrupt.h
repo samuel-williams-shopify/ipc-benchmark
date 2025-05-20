@@ -22,4 +22,8 @@ int interrupt_signal(Interrupt* intr);
 int interrupt_clear(Interrupt* intr);
 
 /* Check if interrupt is set */
-bool interrupt_check(Interrupt* intr); 
+bool interrupt_check(Interrupt* intr);
+
+/* Wait for the interrupt */
+int interrupt_wait(Interrupt* intr);
+

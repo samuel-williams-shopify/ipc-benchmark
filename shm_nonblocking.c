@@ -21,9 +21,10 @@ static bool ring_buffer_write(NonBlockingRingBuffer* rb, const void* data, size_
 /* Thread data structure */
 typedef struct {
     NonBlockingRingBuffer* rb;
-    Interrupt* intr;
+    Interrupt* read_intr;    // Signal when message is ready to process
+    Interrupt* write_intr;   // Signal when ready to send next message
     volatile bool should_exit;
-    void* buffer;
+    Message* msg;            // Message buffer for both sending and receiving
     size_t* msg_size;
     bool* read_success;
 } ThreadData;
@@ -143,33 +144,36 @@ static bool ring_buffer_write(NonBlockingRingBuffer* rb, const void* data, size_
     return true;
 }
 
-/* Thread function that waits on mutex and signals eventfd */
+/* Thread function that handles all shared memory operations */
 static void* notification_thread(void* arg) {
     ThreadData* data = (ThreadData*)arg;
     NonBlockingRingBuffer* rb = data->rb;
     
-    printf("Client thread started\n");
+    fprintf(stderr, "Client thread started\n");
+    fflush(stderr);
     
     while (!data->should_exit) {
-        pthread_mutex_lock(&rb->mutex);
+        interrupt_wait(data->write_intr);
         
-        // Wait for a message to be available
-        while (!rb->message_available && !data->should_exit) {
+        ring_buffer_write(rb, data->msg, data->msg->size);
+        
+        pthread_mutex_lock(&rb->mutex);
+
+        while (!rb->message_available) {
             pthread_cond_wait(&rb->server_cond, &rb->mutex);
         }
         
-        if (rb->message_available && !data->should_exit) {
-            // Read the message
-            *data->read_success = ring_buffer_read(rb, data->buffer, MAX_MSG_SIZE, data->msg_size);
-            
-            // Signal the interrupt to wake up the select() loop
-            interrupt_signal(data->intr);
-        }
+        // Read the message
+        *data->read_success = ring_buffer_read(rb, data->msg, MAX_MSG_SIZE, data->msg_size);
         
         pthread_mutex_unlock(&rb->mutex);
+
+        // Signal the interrupt to wake up the select() loop
+        interrupt_signal(data->read_intr);
     }
     
-    printf("Client thread exiting\n");
+    fprintf(stderr, "Client thread exiting\n");
+    fflush(stderr);
     return NULL;
 }
 
@@ -236,23 +240,27 @@ void free_shm_nonblocking(NonBlockingRingBuffer* rb) {
 }
 
 void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
-    void* buffer = malloc(MAX_MSG_SIZE);
-    if (!buffer) {
+    Message* msg = malloc(MAX_MSG_SIZE);
+    if (!msg) {
         perror("malloc");
         return;
     }
     uint64_t* latencies = malloc(sizeof(uint64_t) * MAX_LATENCIES);
     if (!latencies) {
         perror("malloc");
-        free(buffer);
+        free(msg);
         return;
     }
     size_t latency_count = 0;
     double cpu_start = get_cpu_usage();
 
-    Interrupt* intr = interrupt_create();
-    if (!intr) {
-        free(buffer);
+    // Create interrupts for read and write events
+    Interrupt* read_intr = interrupt_create();
+    Interrupt* write_intr = interrupt_create();
+    if (!read_intr || !write_intr) {
+        if (read_intr) interrupt_destroy(read_intr);
+        if (write_intr) interrupt_destroy(write_intr);
+        free(msg);
         free(latencies);
         return;
     }
@@ -261,9 +269,10 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
     bool read_success = false;
     ThreadData thread_data = {
         .rb = rb,
-        .intr = intr,
+        .read_intr = read_intr,
+        .write_intr = write_intr,
         .should_exit = false,
-        .buffer = buffer,
+        .msg = msg,
         .msg_size = &msg_size,
         .read_success = &read_success
     };
@@ -271,61 +280,39 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
     pthread_t notif_thread;
     if (pthread_create(&notif_thread, NULL, notification_thread, &thread_data) != 0) {
         perror("pthread_create");
-        interrupt_destroy(intr);
-        free(buffer);
+        interrupt_destroy(read_intr);
+        interrupt_destroy(write_intr);
+        free(msg);
         free(latencies);
         return;
     }
 
-    Message* msg = (Message*)buffer;
-    msg->seq = 0;
+    // Warmup phase
     uint64_t start_warmup = get_timestamp_us();
     uint64_t end_warmup = start_warmup + (WARMUP_DURATION * 1000000ULL);
+    
+    // Send first message
     random_message(msg, 2048, 4096);
+    msg->timestamp = get_timestamp_us();
+    interrupt_signal(write_intr);
 
-    // Send first message (warmup)
-    if (!ring_buffer_write(rb, buffer, msg->size)) {
-        fprintf(stderr, "Failed to write message to ring buffer\n");
-        goto cleanup;
-    }
-
-    // Set up select() parameters
-    fd_set read_fds;
-    struct timeval timeout;
-
-    // Warmup phase
     while (get_timestamp_us() < end_warmup) {
-        FD_ZERO(&read_fds);
-        FD_SET(interrupt_get_fd(intr), &read_fds);
-        
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 10000;  // 10ms timeout
-        
-        int ret = select(interrupt_get_fd(intr) + 1, &read_fds, NULL, NULL, &timeout);
-        if (ret < 0) {
-            if (errno == EINTR) continue;
-            perror("select");
+        // Wait for response
+        if (interrupt_wait(read_intr) == -1) {
+            perror("interrupt_wait");
             break;
         }
         
-        if (FD_ISSET(interrupt_get_fd(intr), &read_fds)) {
-            if (interrupt_clear(intr) == -1) {
-                break;
+        if (read_success) {
+            if (!validate_message(msg, msg_size)) {
+                fprintf(stderr, "Client: Message validation failed\n");
+                continue;
             }
             
-            if (read_success) {
-                Message* response = (Message*)buffer;
-                if (!validate_message(response, msg_size)) {
-                    fprintf(stderr, "Client: Message validation failed\n");
-                    continue;
-                }
-                
-                // Send the next warmup message
-                random_message(msg, 2048, 4096);
-                if (!ring_buffer_write(rb, buffer, msg->size)) {
-                    fprintf(stderr, "Failed to write message to ring buffer\n");
-                }
-            }
+            // Send next message
+            random_message(msg, 2048, 4096);
+            msg->timestamp = get_timestamp_us();
+            interrupt_signal(write_intr);
         }
     }
 
@@ -334,60 +321,41 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
     stats->bytes = 0;
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
+    
+    // Send first message
     random_message(msg, 2048, 4096);
     msg->timestamp = get_timestamp_us();
-
-    // Send first message
-    if (!ring_buffer_write(rb, buffer, msg->size)) {
-        fprintf(stderr, "Failed to write message to ring buffer\n");
-        goto cleanup;
-    }
+    interrupt_signal(write_intr);
 
     while (get_timestamp_us() < end_time) {
-        FD_ZERO(&read_fds);
-        FD_SET(interrupt_get_fd(intr), &read_fds);
-        
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 10000;  // 10ms timeout
-        
-        int ret = select(interrupt_get_fd(intr) + 1, &read_fds, NULL, NULL, &timeout);
-        if (ret < 0) {
-            if (errno == EINTR) continue;
-            perror("select");
+        // Wait for response
+        if (interrupt_wait(read_intr) == -1) {
+            perror("interrupt_wait");
             break;
         }
         
-        if (FD_ISSET(interrupt_get_fd(intr), &read_fds)) {
-            if (interrupt_clear(intr) == -1) {
-                break;
+        if (read_success) {
+            if (!validate_message(msg, msg_size)) {
+                fprintf(stderr, "Client: Message validation failed\n");
+                continue;
             }
             
-            if (read_success) {
-                Message* response = (Message*)buffer;
-                if (!validate_message(response, msg_size)) {
-                    fprintf(stderr, "Client: Message validation failed\n");
-                    continue;
-                }
-                
-                // Calculate latency
-                uint64_t now = get_timestamp_us();
-                uint64_t latency = now - response->timestamp;
-                
-                if (latency_count < MAX_LATENCIES) {
-                    latencies[latency_count++] = latency;
-                }
-                
-                // Update statistics
-                stats->ops++;
-                stats->bytes += msg_size;
-                
-                // Send the next message
-                random_message(msg, 2048, 4096);
-                msg->timestamp = get_timestamp_us();
-                if (!ring_buffer_write(rb, buffer, msg->size)) {
-                    fprintf(stderr, "Failed to write message to ring buffer\n");
-                }
+            // Calculate latency
+            uint64_t now = get_timestamp_us();
+            uint64_t latency = now - msg->timestamp;
+            
+            if (latency_count < MAX_LATENCIES) {
+                latencies[latency_count++] = latency;
             }
+            
+            // Update statistics
+            stats->ops++;
+            stats->bytes += msg_size;
+            
+            // Send next message
+            random_message(msg, 2048, 4096);
+            msg->timestamp = get_timestamp_us();
+            interrupt_signal(write_intr);
         }
     }
 
@@ -401,13 +369,12 @@ cleanup:
     calculate_stats(latencies, latency_count, stats);
     
     thread_data.should_exit = true;
-    pthread_mutex_lock(&rb->mutex);
-    pthread_cond_broadcast(&rb->server_cond);
-    pthread_mutex_unlock(&rb->mutex);
+    interrupt_signal(write_intr);  // Wake up thread to check should_exit
     pthread_join(notif_thread, NULL);
     
-    interrupt_destroy(intr);
-    free(buffer);
+    interrupt_destroy(read_intr);
+    interrupt_destroy(write_intr);
+    free(msg);
     free(latencies);
 }
 
@@ -437,8 +404,6 @@ void run_shm_nonblocking_server(NonBlockingRingBuffer* rb, int duration_secs) {
             Message* msg = (Message*)buffer;
             if (!validate_message(msg, msg_size)) {
                 fprintf(stderr, "Server: Message validation failed\n");
-                pthread_mutex_unlock(&rb->mutex);
-                continue;
             }
             
             // Echo the message back

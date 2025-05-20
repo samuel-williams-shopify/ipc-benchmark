@@ -15,6 +15,7 @@ typedef struct {
     size_t size;
     bool message_available;
     bool response_available;
+    bool message_processed;
     bool ready;
     bool is_server;
     char* buffer;

@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <string.h>
+#include <poll.h>
 
 #ifdef __linux__
 #include <sys/eventfd.h>
@@ -106,4 +107,45 @@ int interrupt_clear(Interrupt* intr) {
         return -1;
     }
     return 0;
+}
+
+int interrupt_wait(Interrupt* intr) {
+    if (!intr) {
+        return -1;
+    }
+
+    while (1) {
+        uint64_t value;
+        ssize_t n = read(intr->fd, &value, sizeof(value));
+        
+        if (n == sizeof(value)) {
+            return 0;
+        }
+        if (n != -1 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+            perror("read");
+            return -1;
+        }
+
+        // Data not available, use poll to wait
+        struct pollfd pfd = {
+            .fd = intr->fd,
+            .events = POLLIN,
+            .revents = 0
+        };
+
+        int ret = poll(&pfd, 1, -1);  // -1 means wait indefinitely
+        if (ret < 0) {
+            perror("poll");
+            return -1;
+        }
+
+        if (ret == 0) {
+            // Timeout (shouldn't happen with -1 timeout)
+            return -1;
+        }
+
+        if (!(pfd.revents & POLLIN)) {
+            return -1;
+        }
+    }
 } 

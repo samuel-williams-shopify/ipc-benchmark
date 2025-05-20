@@ -8,10 +8,10 @@ UNAME_S := $(shell uname -s)
 # Platform-specific settings
 ifeq ($(UNAME_S),Linux)
     LDFLAGS := -lpthread -lrt
-    SRC := ipc_benchmark.c buds.c nbuds.c nbshm.c bshm.c lfbshm.c lfnbshm.c benchmark.c interrupt.c
+    SRC := ipc_benchmark.c shm_notification.c shm_blocking.c lfshm_blocking.c lfshm_nonblocking.c benchmark.c interrupt.c uds_blocking.c uds_nonblocking.c
 else
     LDFLAGS := -lpthread
-    SRC := ipc_benchmark.c buds.c nbuds.c nbshm.c bshm.c benchmark.c interrupt.c
+    SRC := ipc_benchmark.c shm_notification.c shm_blocking.c benchmark.c interrupt.c uds_blocking.c uds_nonblocking.c
 endif
 
 # Target executable
@@ -52,31 +52,31 @@ define run_benchmark
 endef
 
 # Run the benchmarks
-run-buds: $(TARGET)
-	$(call run_benchmark,buds)
+run-uds-blocking: $(TARGET)
+	$(call run_benchmark,uds-blocking)
 
-run-nbuds: $(TARGET)
-	$(call run_benchmark,nbuds)
+run-uds-nonblocking: $(TARGET)
+	$(call run_benchmark,uds-nonblocking)
 
-run-nbshm: $(TARGET)
-	$(call run_benchmark,nbshm)
+run-shm-notification: $(TARGET)
+	$(call run_benchmark,shm-notification)
 
-run-bshm: $(TARGET)
-	$(call run_benchmark,bshm)
+run-shm-blocking: $(TARGET)
+	$(call run_benchmark,shm-blocking)
 
 # Lock-free shared memory benchmark - Linux only
-run-lfbshm: $(TARGET)
+run-lfshm-blocking: $(TARGET)
 ifeq ($(UNAME_S),Linux)
-	$(call run_benchmark,lfbshm)
+	$(call run_benchmark,lfshm-blocking)
 else
 	@echo "Lock-free shared memory mode is only supported on Linux"
 	@exit 0
 endif
 
 # Lock-free non-blocking shared memory benchmark - Linux only
-run-lfnbshm: $(TARGET)
+run-lfshm-nonblocking: $(TARGET)
 ifeq ($(UNAME_S),Linux)
-	$(call run_benchmark,lfnbshm)
+	$(call run_benchmark,lfshm-nonblocking)
 else
 	@echo "Lock-free non-blocking shared memory mode is only supported on Linux"
 	@exit 0
@@ -86,17 +86,17 @@ endif
 run-all:
 	@printf "## IPC Benchmark Suite\n\n"
 ifeq ($(UNAME_S),Linux)
-	$(MAKE) run-buds && \
-	$(MAKE) run-nbuds && \
-	$(MAKE) run-nbshm && \
-	$(MAKE) run-bshm && \
-	$(MAKE) run-lfbshm && \
-	$(MAKE) run-lfnbshm
+	$(MAKE) run-uds-blocking && \
+	$(MAKE) run-uds-nonblocking && \
+	$(MAKE) run-shm-notification && \
+	$(MAKE) run-shm-blocking && \
+	$(MAKE) run-lfshm-blocking && \
+	$(MAKE) run-lfshm-nonblocking
 else
-	$(MAKE) run-buds && \
-	$(MAKE) run-nbuds && \
-	$(MAKE) run-nbshm && \
-	$(MAKE) run-bshm
+	$(MAKE) run-uds-blocking && \
+	$(MAKE) run-uds-nonblocking && \
+	$(MAKE) run-shm-notification && \
+	$(MAKE) run-shm-blocking
 endif
 	@printf "\nIPC Benchmark Suite Complete\n\n"
 
@@ -105,14 +105,12 @@ help:
 	@echo "Available targets:"
 	@echo "  all       - Build the benchmark executable"
 	@echo "  clean     - Remove compiled files"
-	@echo "  run-buds   - Run Blocking Unix Domain Socket benchmark"
-	@echo "  run-nbuds  - Run Non-Blocking Unix Domain Socket benchmark (client side only)"
-	@echo "  run-nbshm - Run Notification-based Shared Memory benchmark"
-	@echo "  run-bshm  - Run Blocking Shared Memory benchmark"
-ifeq ($(UNAME_S),Linux)
-	@echo "  run-lfbshm - Run Lock-free Blocking Shared Memory benchmark (Linux only)"
-	@echo "  run-lfnbshm - Run Lock-free Non-Blocking Shared Memory benchmark (Linux only)"
-endif
+	@echo "  run-uds-blocking - Run Blocking Unix Domain Socket benchmark"
+	@echo "  run-uds-nonblocking - Run Non-Blocking Unix Domain Socket benchmark"
+	@echo "  run-shm-notification - Run Notification-based Shared Memory benchmark"
+	@echo "  run-shm-blocking  - Run Blocking Shared Memory benchmark"
+	@echo "  run-lfshm-blocking - Run Lock-free Blocking Shared Memory benchmark (Linux only)"
+	@echo "  run-lfshm-nonblocking - Run Lock-free Non-Blocking Shared Memory benchmark (Linux only)"
 	@echo "  run-all   - Run all benchmarks sequentially"
 
-.PHONY: all clean run-buds run-nbuds run-nbshm run-bshm run-lfbshm run-lfnbshm run-all help   
+.PHONY: all clean run-uds-blocking run-uds-nonblocking run-shm-notification run-shm-blocking run-lfshm-blocking run-lfshm-nonblocking run-all help   

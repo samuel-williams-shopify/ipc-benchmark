@@ -15,17 +15,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <unistd.h>
 
 #include "interrupt.h"
 #include "benchmark.h"
-#include "buds.h"
-#include "nbshm.h"
-#include "bshm.h"
+#include "shm_notification.h"
+#include "shm_blocking.h"
 #ifdef __linux__
-#include "lfbshm.h"
-#include "lfnbshm.h"
+#include "lfshm_blocking.h"
+#include "lfshm_nonblocking.h"
 #endif
-#include "nbuds.h"
+#include "uds_blocking.h"
+#include "uds_nonblocking.h"
 
 /* Function prototypes */
 void print_usage(const char* prog_name);
@@ -36,7 +37,7 @@ void print_usage(const char* prog_name) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -s, --server           Run as server\n");
     fprintf(stderr, "  -c, --client           Run as client\n");
-    fprintf(stderr, "  -m, --mode MODE        IPC mode (buds, nbuds, nbshm, bshm, lfbshm, lfnbshm)\n");
+    fprintf(stderr, "  -m, --mode MODE        IPC mode (uds-blocking, uds-nonblocking, shm-notification, shm-blocking, lfshm-blocking, lfshm-nonblocking)\n");
     fprintf(stderr, "  -d, --duration SECS    Benchmark duration in seconds\n");
     fprintf(stderr, "  -h, --help             Show this help message\n");
 }
@@ -105,128 +106,128 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (strcmp(mode, "buds") == 0) {
+    if (strcmp(mode, "uds-blocking") == 0) {
         if (is_server) {
-            BUDSState* state = setup_buds_server(SOCKET_PATH);
+            UDSBlockingState* state = setup_uds_blocking_server("/tmp/uds_blocking.sock");
             if (!state) {
-                fprintf(stderr, "Failed to setup Blocking Unix Domain Socket server\n");
+                fprintf(stderr, "Failed to setup Unix Domain Socket server\n");
                 return 1;
             }
-            run_buds_server(state, duration_secs);
-            free_buds(state);
+            run_uds_blocking_server(state, duration_secs);
+            free_uds_blocking(state);
         } else {
-            BUDSState* state = setup_buds_client(SOCKET_PATH);
+            UDSBlockingState* state = setup_uds_blocking_client("/tmp/uds_blocking.sock");
             if (!state) {
-                fprintf(stderr, "Failed to setup Blocking Unix Domain Socket client\n");
+                fprintf(stderr, "Failed to setup Unix Domain Socket client\n");
                 return 1;
             }
             BenchmarkStats stats = {0};
-            run_buds_client(state, duration_secs, &stats);
+            run_uds_blocking_client(state, duration_secs, &stats);
             print_stats(&stats, "Blocking Unix Domain Socket");
-            free_buds(state);
+            free_uds_blocking(state);
         }
-    } else if (strcmp(mode, "nbuds") == 0) {
+    } else if (strcmp(mode, "uds-nonblocking") == 0) {
         if (is_server) {
-            NBUDSState* state = setup_nbuds_server(SOCKET_PATH);
+            UDSNonblockingState* state = setup_uds_nonblocking_server("/tmp/uds_nonblocking.sock");
             if (!state) {
-                fprintf(stderr, "Failed to setup Non-Blocking Unix Domain Socket server\n");
+                fprintf(stderr, "Failed to setup Unix Domain Socket server\n");
                 return 1;
             }
-            run_nbuds_server(state, duration_secs);
-            free_nbuds(state);
+            run_uds_nonblocking_server(state, duration_secs);
+            free_uds_nonblocking(state);
         } else {
-            NBUDSState* state = setup_nbuds_client(SOCKET_PATH);
+            UDSNonblockingState* state = setup_uds_nonblocking_client("/tmp/uds_nonblocking.sock");
             if (!state) {
-                fprintf(stderr, "Failed to setup Non-Blocking Unix Domain Socket client\n");
+                fprintf(stderr, "Failed to setup Unix Domain Socket client\n");
                 return 1;
             }
             BenchmarkStats stats = {0};
-            run_nbuds_client(state, duration_secs, &stats);
+            run_uds_nonblocking_client(state, duration_secs, &stats);
             print_stats(&stats, "Non-Blocking Unix Domain Socket");
-            free_nbuds(state);
+            free_uds_nonblocking(state);
         }
-    } else if (strcmp(mode, "nbshm") == 0) {
-        NonBlockingRingBuffer* rb = setup_nbshm(BUFFER_SIZE, is_server);
+    } else if (strcmp(mode, "shm-notification") == 0) {
+        NonBlockingRingBuffer* rb = setup_shm_notification(BUFFER_SIZE, is_server);
         if (rb == NULL) {
-            fprintf(stderr, "Failed to setup Non-Blocking Shared Memory\n");
+            fprintf(stderr, "Failed to setup Notification-based Shared Memory\n");
             return 1;
         }
         if (is_server) {
-            run_nbshm_server(rb, duration_secs);
+            run_shm_notification_server(rb, duration_secs);
         } else {
             BenchmarkStats stats = {0};
-            run_nbshm_client(rb, duration_secs, &stats);
-            print_stats(&stats, "Non-Blocking Shared Memory");
+            run_shm_notification_client(rb, duration_secs, &stats);
+            print_stats(&stats, "Notification-based Shared Memory");
         }
-        free_nbshm(rb);
-    } else if (strcmp(mode, "bshm") == 0) {
+        free_shm_notification(rb);
+    } else if (strcmp(mode, "shm-blocking") == 0) {
         if (is_server) {
-            BlockingRingBuffer* rb = setup_bshm(BUFFER_SIZE, true);
+            BlockingRingBuffer* rb = setup_shm_blocking(BUFFER_SIZE, true);
             if (!rb) {
                 fprintf(stderr, "Failed to setup Blocking Shared Memory server\n");
                 return 1;
             }
-            run_bshm_server(rb, duration_secs);
-            free_bshm(rb);
+            run_shm_blocking_server(rb, duration_secs);
+            free_shm_blocking(rb);
         } else {
-            BlockingRingBuffer* rb = setup_bshm(BUFFER_SIZE, false);
+            BlockingRingBuffer* rb = setup_shm_blocking(BUFFER_SIZE, false);
             if (!rb) {
                 fprintf(stderr, "Failed to setup Blocking Shared Memory client\n");
                 return 1;
             }
             BenchmarkStats stats = {0};
-            run_bshm_client(rb, duration_secs, &stats);
+            run_shm_blocking_client(rb, duration_secs, &stats);
             print_stats(&stats, "Blocking Shared Memory");
-            free_bshm(rb);
+            free_shm_blocking(rb);
         }
-    } else if (strcmp(mode, "lfbshm") == 0) {
+    } else if (strcmp(mode, "lfshm-blocking") == 0) {
 #ifdef HAVE_FUTEX
         if (is_server) {
-            LockFreeBlockingRingBuffer* rb = setup_lfbshm(BUFFER_SIZE, true);
+            LockFreeBlockingRingBuffer* rb = setup_lfshm_blocking(BUFFER_SIZE, true);
             if (!rb) {
-                fprintf(stderr, "Failed to setup Lock-Free Blocking Shared Memory server\n");
+                fprintf(stderr, "Failed to setup Lock-free Blocking Shared Memory server\n");
                 return 1;
             }
-            run_lfbshm_server(rb, duration_secs);
-            free_lfbshm(rb);
+            run_lfshm_blocking_server(rb, duration_secs);
+            free_lfshm_blocking(rb);
         } else {
-            LockFreeBlockingRingBuffer* rb = setup_lfbshm(BUFFER_SIZE, false);
+            LockFreeBlockingRingBuffer* rb = setup_lfshm_blocking(BUFFER_SIZE, false);
             if (!rb) {
-                fprintf(stderr, "Failed to setup Lock-Free Blocking Shared Memory client\n");
+                fprintf(stderr, "Failed to setup Lock-free Blocking Shared Memory client\n");
                 return 1;
             }
             BenchmarkStats stats = {0};
-            run_lfbshm_client(rb, duration_secs, &stats);
-            print_stats(&stats, "Lock-Free Blocking Shared Memory");
-            free_lfbshm(rb);
+            run_lfshm_blocking_client(rb, duration_secs, &stats);
+            print_stats(&stats, "Lock-free Blocking Shared Memory");
+            free_lfshm_blocking(rb);
         }
 #else
-        fprintf(stderr, "Lock-Free Blocking Shared Memory is only available on Linux\n");
+        fprintf(stderr, "Lock-free Blocking Shared Memory is only available on Linux\n");
         return 1;
 #endif
-    } else if (strcmp(mode, "lfnbshm") == 0) {
+    } else if (strcmp(mode, "lfshm-nonblocking") == 0) {
 #ifdef __linux__
         if (is_server) {
-            LockFreeNonBlockingRingBuffer* rb = setup_lfnbshm(BUFFER_SIZE, true);
+            LockFreeNonBlockingRingBuffer* rb = setup_lfshm_nonblocking(BUFFER_SIZE, true);
             if (!rb) {
-                fprintf(stderr, "Failed to setup Lock-Free Non-Blocking Shared Memory server\n");
+                fprintf(stderr, "Failed to setup Lock-free Non-Blocking Shared Memory server\n");
                 return 1;
             }
-            run_lfnbshm_server(rb, duration_secs);
-            free_lfnbshm(rb);
+            run_lfshm_nonblocking_server(rb, duration_secs);
+            free_lfshm_nonblocking(rb);
         } else {
-            LockFreeNonBlockingRingBuffer* rb = setup_lfnbshm(BUFFER_SIZE, false);
+            LockFreeNonBlockingRingBuffer* rb = setup_lfshm_nonblocking(BUFFER_SIZE, false);
             if (!rb) {
-                fprintf(stderr, "Failed to setup Lock-Free Non-Blocking Shared Memory client\n");
+                fprintf(stderr, "Failed to setup Lock-free Non-Blocking Shared Memory client\n");
                 return 1;
             }
             BenchmarkStats stats = {0};
-            run_lfnbshm_client(rb, duration_secs, &stats);
-            print_stats(&stats, "Lock-Free Non-Blocking Shared Memory");
-            free_lfnbshm(rb);
+            run_lfshm_nonblocking_client(rb, duration_secs, &stats);
+            print_stats(&stats, "Lock-free Non-Blocking Shared Memory");
+            free_lfshm_nonblocking(rb);
         }
 #else
-        fprintf(stderr, "Lock-Free Non-Blocking Shared Memory is only available on Linux\n");
+        fprintf(stderr, "Lock-free Non-Blocking Shared Memory is only available on Linux\n");
         return 1;
 #endif
     } else {
@@ -236,4 +237,11 @@ int main(int argc, char* argv[]) {
     }
 
     return 0;
+}
+
+volatile bool should_exit = false;
+
+void signal_handler(int signum) {
+    (void)signum;
+    should_exit = true;
 }

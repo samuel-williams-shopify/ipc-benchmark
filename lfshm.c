@@ -10,16 +10,6 @@
 #include <sys/stat.h>
 #include <sys/select.h>
 
-#ifdef HAVE_FUTEX
-#include <linux/futex.h>
-#include <sys/syscall.h>
-
-static int futex(uint32_t* uaddr, int futex_op, uint32_t val,
-                const struct timespec* timeout, uint32_t* uaddr2, uint32_t val3) {
-    return syscall(SYS_futex, uaddr, futex_op, val, timeout, uaddr2, val3);
-}
-#endif
-
 /* Setup lock-free shared memory */
 LockFreeRingBuffer* setup_lockfree_shared_memory(size_t size) {
     int fd;

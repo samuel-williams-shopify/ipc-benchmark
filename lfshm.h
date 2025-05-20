@@ -20,6 +20,7 @@ typedef struct LockFreeRingBuffer LockFreeRingBuffer;
 #ifdef __linux__
 #include <linux/futex.h>
 #include <sys/syscall.h>
+#include <unistd.h>
 #define HAVE_FUTEX 1
 
 static inline int futex_wait(volatile uint32_t* uaddr, uint32_t val) {

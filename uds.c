@@ -202,6 +202,11 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
                                         (char*)buffer + total_bytes_written,
                                         msg->size - total_bytes_written);
             if (bytes_written < 0) {
+                if (errno == EPIPE) {
+                    // Server closed connection, exit gracefully
+                    printf("Server closed connection\n");
+                    break;
+                }
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
                     perror("write");
                     break;
@@ -299,6 +304,11 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
                                         (char*)buffer + total_bytes_written,
                                         msg->size - total_bytes_written);
             if (bytes_written < 0) {
+                if (errno == EPIPE) {
+                    // Server closed connection, exit gracefully
+                    printf("Server closed connection\n");
+                    break;
+                }
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
                     perror("write");
                     break;

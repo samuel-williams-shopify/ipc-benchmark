@@ -37,17 +37,17 @@ clean:
 
 # Helper function to run a benchmark safely
 define run_benchmark
-	@echo "\n=== Running $(1) Benchmark ===\n"; \
+	@printf "\n## Running $(1) Benchmark\n\n"; \
 	trap 'kill $$SERVER_PID 2>/dev/null || true' EXIT; \
 	./$(TARGET) --server --mode $(1) & \
 	SERVER_PID=$$!; \
-	echo "Server PID: $$SERVER_PID"; \
+	printf "Server PID: %d\n" $$SERVER_PID; \
 	sleep 2; \
 	./$(TARGET) --client --mode $(1); \
 	RESULT=$$?; \
 	kill $$SERVER_PID 2>/dev/null || true; \
 	wait $$SERVER_PID 2>/dev/null || true; \
-	echo "\n=== $(1) Benchmark Complete ===\n"; \
+	printf "$(1) Benchmark Complete\n\n"; \
 	exit $$RESULT
 endef
 
@@ -69,7 +69,7 @@ endif
 
 # Run all benchmarks
 run-all:
-	@echo "Starting IPC Benchmark Suite\n"
+	@printf "## IPC Benchmark Suite\n\n"
 ifeq ($(UNAME_S),Linux)
 	$(MAKE) run-uds && \
 	$(MAKE) run-shm && \
@@ -78,7 +78,7 @@ else
 	$(MAKE) run-uds && \
 	$(MAKE) run-shm
 endif
-	@echo "\nIPC Benchmark Suite Complete\n"
+	@printf "\nIPC Benchmark Suite Complete\n\n"
 
 # Show help
 help:

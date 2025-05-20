@@ -26,6 +26,10 @@ The suite includes four different IPC implementations:
    - Lock-free ring buffer design
    - Optimized for low latency
 
+5. **Lock-free io_uring Shared Memory (LFUSHM)**
+   - Uses lock-free shared memory with io_uring for futex operations
+   - Combines the performance of lock-free shared memory with the efficiency of io_uring's event loop integration
+
 ## Building
 
 ```bash
@@ -159,7 +163,7 @@ sequenceDiagram
 
 ### Lock-free Shared Memory (LFSHM)
 
-Uses lock-free shared memory with futexes for coordination. Shows the absolute best possible performance possible. In principle, we could implement a client using io_uring's `io_uring_prep_futex_wait` and `io_uring_prep_futex_wake` operations for event loop integration.
+Uses lock-free shared memory with futexes for coordination. Shows the absolute best possible performance possible.
 
 - Linux-specific implementation using futex
 - Lock-free ring buffer design
@@ -195,6 +199,46 @@ sequenceDiagram
     C->>SHM: Read Response (lock-free)
     Note over C: Update read index
 
+```
+
+### Lock-free io_uring Shared Memory (LFUSHM)
+
+Uses lock-free shared memory with io_uring for futex operations. This implementation shows how to integrate lock-free shared memory with an event loop using io_uring's futex operations. It combines the performance of lock-free shared memory with the efficiency of io_uring's event loop integration.
+
+- Linux-specific implementation using futex and io_uring
+- Lock-free ring buffer design
+- io_uring-based futex operations
+- Fixed-size ring buffer (4MB)
+- Message size limit of 2MB (half buffer size)
+- Requires Linux kernel with io_uring support
+- Messages flow through shared memory with lock-free synchronization
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant UR as io_uring
+    participant SHM as Shared Memory
+    participant S as Server
+
+    Note over C: Check write space
+    C->>SHM: Write Message (lock-free)
+    Note over C: Update write index
+    C->>UR: Submit futex wake
+    
+    Note over S: io_uring futex wait
+    Note over S: Check read space
+    S->>SHM: Read Message (lock-free)
+    Note over S: Update read index
+    
+    Note over S: Check write space
+    S->>SHM: Write Response (lock-free)
+    Note over S: Update write index
+    S->>UR: Submit futex wake
+    
+    Note over C: io_uring futex wait
+    Note over C: Check read space
+    C->>SHM: Read Response (lock-free)
+    Note over C: Update read index
 ```
 
 ## Comparison

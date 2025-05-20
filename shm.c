@@ -456,7 +456,7 @@ void run_shm_server(RingBuffer* rb, int duration_secs) {
     
     // Print timing metrics before cleanup
     printf("\nDetailed Timing Metrics:\n");
-    printf("Total Operations: %llu\n", rb->total_ops);
+    printf("Total Operations: %lu\n", (unsigned long)rb->total_ops);
     printf("Average Mutex Lock Time: %.2f µs\n", (double)rb->mutex_lock_time / rb->total_ops);
     printf("Average Condition Wait Time: %.2f µs\n", (double)rb->cond_wait_time / rb->total_ops);
     printf("Average Notification Time: %.2f µs\n", (double)rb->notify_time / rb->total_ops);
@@ -675,7 +675,7 @@ void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
 
     // Print timing metrics at the end
     printf("\nDetailed Timing Metrics:\n");
-    printf("Total Operations: %llu\n", rb->total_ops);
+    printf("Total Operations: %lu\n", (unsigned long)rb->total_ops);
     printf("Average Mutex Lock Time: %.2f µs\n", (double)rb->mutex_lock_time / rb->total_ops);
     printf("Average Condition Wait Time: %.2f µs\n", (double)rb->cond_wait_time / rb->total_ops);
     printf("Average Notification Time: %.2f µs\n", (double)rb->notify_time / rb->total_ops);

@@ -52,7 +52,7 @@ LockFreeRingBuffer* setup_lockfree_shared_memory(size_t size) {
     atomic_store_release(&rb->server_futex, 0);
     atomic_store_release(&rb->client_futex, 0);
     rb->size = size;
-    atomic_store_release(&rb->ready, true);
+    atomic_store_explicit(&rb->ready, true, memory_order_release);
 
     close(fd);
     return rb;
@@ -209,10 +209,10 @@ void run_lfshm_server(LockFreeRingBuffer* rb, int duration_secs) {
             }
             
             // Wake up client if it's waiting
-            futex_wake(&rb->client_futex, 1);
+            futex_wake((volatile uint32_t*)&rb->client_futex, 1);
         } else {
             // Wait for client to write
-            futex_wait(&rb->server_futex, atomic_load_acquire(&rb->server_futex));
+            futex_wait((volatile uint32_t*)&rb->server_futex, atomic_load_acquire(&rb->server_futex));
         }
     }
     
@@ -260,7 +260,7 @@ void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats*
     }
     
     // Wake up server
-    futex_wake(&rb->server_futex, 1);
+    futex_wake((volatile uint32_t*)&rb->server_futex, 1);
 
     // Warmup phase
     while (get_timestamp_us() < end_warmup) {
@@ -295,10 +295,10 @@ void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats*
             }
             
             // Wake up server
-            futex_wake(&rb->server_futex, 1);
+            futex_wake((volatile uint32_t*)&rb->server_futex, 1);
         } else {
             // Wait for server to write
-            futex_wait(&rb->client_futex, atomic_load_acquire(&rb->client_futex));
+            futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_acquire(&rb->client_futex));
         }
     }
     
@@ -321,7 +321,7 @@ void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats*
     }
     
     // Wake up server
-    futex_wake(&rb->server_futex, 1);
+    futex_wake((volatile uint32_t*)&rb->server_futex, 1);
 
     while (get_timestamp_us() < end_time) {
         // Read response from ring buffer
@@ -355,10 +355,10 @@ void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats*
             }
             
             // Wake up server
-            futex_wake(&rb->server_futex, 1);
+            futex_wake((volatile uint32_t*)&rb->server_futex, 1);
         } else {
             // Wait for server to write
-            futex_wait(&rb->client_futex, atomic_load_acquire(&rb->client_futex));
+            futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_acquire(&rb->client_futex));
         }
     }
     

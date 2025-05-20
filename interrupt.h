@@ -1,5 +1,4 @@
-#ifndef INTERRUPT_H
-#define INTERRUPT_H
+#pragma once
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -22,4 +21,5 @@ int interrupt_signal(Interrupt* intr);
 /* Clear the interrupt (read any pending signals) */
 int interrupt_clear(Interrupt* intr);
 
-#endif /* INTERRUPT_H */ 
+/* Check if interrupt is set */
+bool interrupt_check(Interrupt* intr); 

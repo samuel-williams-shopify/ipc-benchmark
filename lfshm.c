@@ -16,6 +16,10 @@ LockFreeRingBuffer* setup_lockfree_shared_memory(size_t size) {
     LockFreeRingBuffer* rb = NULL;
     size_t total_size = sizeof(LockFreeRingBuffer) + size;
 
+    // Ensure size is power of 2 for faster modulo operations
+    size = 1ULL << (64 - __builtin_clzll(size - 1));
+    total_size = sizeof(LockFreeRingBuffer) + size;
+
     size_t page_size = getpagesize();
     total_size = (total_size + page_size - 1) & ~(page_size - 1);
 
@@ -43,10 +47,12 @@ LockFreeRingBuffer* setup_lockfree_shared_memory(size_t size) {
     }
 
     // Initialize the ring buffer
-    rb->read_pos = 0;
-    rb->write_pos = 0;
+    atomic_store_release(&rb->read_pos, 0);
+    atomic_store_release(&rb->write_pos, 0);
+    atomic_store_release(&rb->server_futex, 0);
+    atomic_store_release(&rb->client_futex, 0);
     rb->size = size;
-    rb->ready = true;
+    atomic_store_release(&rb->ready, true);
 
     close(fd);
     return rb;
@@ -57,14 +63,15 @@ static bool ring_buffer_read(LockFreeRingBuffer* rb, void* data, size_t max_len,
     *bytes_read = 0;
     
     // Check if the buffer is empty
-    if (rb->read_pos == rb->write_pos) {
+    uint32_t read_pos = atomic_load_acquire(&rb->read_pos);
+    uint32_t write_pos = atomic_load_acquire(&rb->write_pos);
+    
+    if (read_pos == write_pos) {
         return false;
     }
     
     // Read the message length first
     uint32_t msg_len;
-    uint32_t read_pos = rb->read_pos;
-    
     if (read_pos + sizeof(uint32_t) > rb->size) {
         // Wrap around for the length
         size_t first_chunk = rb->size - read_pos;
@@ -102,7 +109,7 @@ static bool ring_buffer_read(LockFreeRingBuffer* rb, void* data, size_t max_len,
     }
     
     // Update the read position atomically
-    rb->read_pos = read_pos;
+    atomic_store_release(&rb->read_pos, read_pos);
     *bytes_read = msg_len;
     
     return true;
@@ -116,8 +123,8 @@ static bool ring_buffer_write(LockFreeRingBuffer* rb, const void* data, size_t l
     }
     
     // Calculate available space
-    uint32_t read_pos = rb->read_pos;
-    uint32_t write_pos = rb->write_pos;
+    uint32_t read_pos = atomic_load_acquire(&rb->read_pos);
+    uint32_t write_pos = atomic_load_acquire(&rb->write_pos);
     size_t available;
     
     if (write_pos >= read_pos) {
@@ -165,7 +172,7 @@ static bool ring_buffer_write(LockFreeRingBuffer* rb, const void* data, size_t l
     }
     
     // Update the write position atomically
-    rb->write_pos = write_pos;
+    atomic_store_release(&rb->write_pos, write_pos);
     
     return true;
 }
@@ -200,10 +207,13 @@ void run_lfshm_server(LockFreeRingBuffer* rb, int duration_secs) {
             if (!ring_buffer_write(rb, buffer, msg_size)) {
                 fprintf(stderr, "Failed to write response to ring buffer\n");
             }
+            
+            // Wake up client if it's waiting
+            futex_wake(&rb->client_futex, 1);
+        } else {
+            // Wait for client to write
+            futex_wait(&rb->server_futex, atomic_load_acquire(&rb->server_futex));
         }
-        
-        // Small delay to prevent busy waiting
-        usleep(1);
     }
     
     if (get_timestamp_us() >= end_time - 100000) { // Within 100ms of end
@@ -248,6 +258,9 @@ void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats*
         fprintf(stderr, "Failed to write message to ring buffer\n");
         goto cleanup;
     }
+    
+    // Wake up server
+    futex_wake(&rb->server_futex, 1);
 
     // Warmup phase
     while (get_timestamp_us() < end_warmup) {
@@ -280,10 +293,13 @@ void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats*
             if (!ring_buffer_write(rb, buffer, msg->size)) {
                 fprintf(stderr, "Failed to write message to ring buffer\n");
             }
+            
+            // Wake up server
+            futex_wake(&rb->server_futex, 1);
+        } else {
+            // Wait for server to write
+            futex_wait(&rb->client_futex, atomic_load_acquire(&rb->client_futex));
         }
-        
-        // Small delay to prevent busy waiting
-        usleep(1);
     }
     
     printf("Warmup completed, starting benchmark...\n");
@@ -303,6 +319,9 @@ void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats*
         fprintf(stderr, "Failed to write message to ring buffer\n");
         goto cleanup;
     }
+    
+    // Wake up server
+    futex_wake(&rb->server_futex, 1);
 
     while (get_timestamp_us() < end_time) {
         // Read response from ring buffer
@@ -334,10 +353,13 @@ void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats*
             if (!ring_buffer_write(rb, buffer, msg->size)) {
                 fprintf(stderr, "Failed to write message to ring buffer\n");
             }
+            
+            // Wake up server
+            futex_wake(&rb->server_futex, 1);
+        } else {
+            // Wait for server to write
+            futex_wait(&rb->client_futex, atomic_load_acquire(&rb->client_futex));
         }
-        
-        // Small delay to prevent busy waiting
-        usleep(1);
     }
     
     if (get_timestamp_us() >= end_time - 100000) { // Within 100ms of end

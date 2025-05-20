@@ -1,5 +1,4 @@
-#ifndef BENCHMARK_H
-#define BENCHMARK_H
+#pragma once
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -47,6 +46,4 @@ double get_cpu_usage(void);
 uint32_t calculate_checksum(const void* data, size_t len);
 bool validate_message(const Message* msg, size_t total_size);
 void random_message(Message* msg, int min_size, int max_size);
-void* alloc_aligned_buffer(size_t size);
-
-#endif /* BENCHMARK_H */ 
+void* alloc_aligned_buffer(size_t size); 

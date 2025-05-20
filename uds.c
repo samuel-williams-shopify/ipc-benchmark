@@ -127,7 +127,7 @@ void run_uds_server(int socket_fd, int duration_secs) {
             break;
         }
         if (bytes_written != msg->size) {
-            fprintf(stderr, "Server: Write incomplete: wrote %zd of %zu bytes\n", bytes_written, msg->size);
+            fprintf(stderr, "Server: Write incomplete: wrote %zd of %u bytes\n", bytes_written, msg->size);
         }
     }
     

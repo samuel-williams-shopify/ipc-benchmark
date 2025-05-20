@@ -1,5 +1,4 @@
-#ifndef SHM_H
-#define SHM_H
+#pragma once
 
 #include "benchmark.h"
 #include "interrupt.h"
@@ -34,6 +33,4 @@ RingBuffer* setup_shared_memory(size_t size, bool is_server);
 void run_shm_server(RingBuffer* rb, int duration_secs);
 
 /* Run the Shared Memory client benchmark */
-void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats);
-
-#endif /* SHM_H */ 
+void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats); 

@@ -8,15 +8,16 @@ UNAME_S := $(shell uname -s)
 # Platform-specific settings
 ifeq ($(UNAME_S),Linux)
     LDFLAGS := -lpthread -lrt
+    SRC := ipc_benchmark.c uds.c shm.c lfshm.c benchmark.c interrupt.c
 else
     LDFLAGS := -lpthread
+    SRC := ipc_benchmark.c uds.c shm.c benchmark.c interrupt.c
 endif
 
 # Target executable
 TARGET := ipc_benchmark
 
-# Source files
-SRC := ipc_benchmark.c uds.c shm.c lfshm.c benchmark.c interrupt.c
+# Object files
 OBJ := $(SRC:.c=.o)
 
 # Default target

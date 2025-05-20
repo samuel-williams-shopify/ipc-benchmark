@@ -8,10 +8,10 @@ UNAME_S := $(shell uname -s)
 # Platform-specific settings
 ifeq ($(UNAME_S),Linux)
     LDFLAGS := -lpthread -lrt
-    SRC := ipc_benchmark.c shm_notification.c shm_blocking.c lfshm_blocking.c lfshm_nonblocking.c benchmark.c interrupt.c uds_blocking.c uds_nonblocking.c
+    SRC := ipc_benchmark.c shm_nonblocking.c shm_blocking.c lfshm_blocking.c lfshm_nonblocking.c benchmark.c interrupt.c uds_blocking.c uds_nonblocking.c
 else
     LDFLAGS := -lpthread
-    SRC := ipc_benchmark.c shm_notification.c shm_blocking.c benchmark.c interrupt.c uds_blocking.c uds_nonblocking.c
+    SRC := ipc_benchmark.c shm_nonblocking.c shm_blocking.c benchmark.c interrupt.c uds_blocking.c uds_nonblocking.c
 endif
 
 # Target executable
@@ -58,8 +58,8 @@ run-uds-blocking: $(TARGET)
 run-uds-nonblocking: $(TARGET)
 	$(call run_benchmark,uds-nonblocking)
 
-run-shm-notification: $(TARGET)
-	$(call run_benchmark,shm-notification)
+run-shm-nonblocking: $(TARGET)
+	$(call run_benchmark,shm-nonblocking)
 
 run-shm-blocking: $(TARGET)
 	$(call run_benchmark,shm-blocking)
@@ -88,14 +88,14 @@ run-all:
 ifeq ($(UNAME_S),Linux)
 	$(MAKE) run-uds-blocking && \
 	$(MAKE) run-uds-nonblocking && \
-	$(MAKE) run-shm-notification && \
+	$(MAKE) run-shm-nonblocking && \
 	$(MAKE) run-shm-blocking && \
 	$(MAKE) run-lfshm-blocking && \
 	$(MAKE) run-lfshm-nonblocking
 else
 	$(MAKE) run-uds-blocking && \
 	$(MAKE) run-uds-nonblocking && \
-	$(MAKE) run-shm-notification && \
+	$(MAKE) run-shm-nonblocking && \
 	$(MAKE) run-shm-blocking
 endif
 	@printf "\nIPC Benchmark Suite Complete\n\n"
@@ -107,10 +107,10 @@ help:
 	@echo "  clean     - Remove compiled files"
 	@echo "  run-uds-blocking - Run Blocking Unix Domain Socket benchmark"
 	@echo "  run-uds-nonblocking - Run Non-Blocking Unix Domain Socket benchmark"
-	@echo "  run-shm-notification - Run Notification-based Shared Memory benchmark"
+	@echo "  run-shm-nonblocking - Run Non-Blocking Shared Memory benchmark"
 	@echo "  run-shm-blocking  - Run Blocking Shared Memory benchmark"
 	@echo "  run-lfshm-blocking - Run Lock-free Blocking Shared Memory benchmark (Linux only)"
 	@echo "  run-lfshm-nonblocking - Run Lock-free Non-Blocking Shared Memory benchmark (Linux only)"
 	@echo "  run-all   - Run all benchmarks sequentially"
 
-.PHONY: all clean run-uds-blocking run-uds-nonblocking run-shm-notification run-shm-blocking run-lfshm-blocking run-lfshm-nonblocking run-all help   
+.PHONY: all clean run-uds-blocking run-uds-nonblocking run-shm-nonblocking run-shm-blocking run-lfshm-blocking run-lfshm-nonblocking run-all help   

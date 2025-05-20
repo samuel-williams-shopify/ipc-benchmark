@@ -19,7 +19,7 @@
 
 #include "interrupt.h"
 #include "benchmark.h"
-#include "shm_notification.h"
+#include "shm_nonblocking.h"
 #include "shm_blocking.h"
 #ifdef __linux__
 #include "lfshm_blocking.h"
@@ -147,19 +147,19 @@ int main(int argc, char* argv[]) {
             free_uds_nonblocking(state);
         }
     } else if (strcmp(mode, "shm-notification") == 0) {
-        NonBlockingRingBuffer* rb = setup_shm_notification(BUFFER_SIZE, is_server);
+        NonBlockingRingBuffer* rb = setup_shm_nonblocking(BUFFER_SIZE, is_server);
         if (rb == NULL) {
             fprintf(stderr, "Failed to setup Notification-based Shared Memory\n");
             return 1;
         }
         if (is_server) {
-            run_shm_notification_server(rb, duration_secs);
+            run_shm_nonblocking_server(rb, duration_secs);
         } else {
             BenchmarkStats stats = {0};
-            run_shm_notification_client(rb, duration_secs, &stats);
+            run_shm_nonblocking_client(rb, duration_secs, &stats);
             print_stats(&stats, "Notification-based Shared Memory");
         }
-        free_shm_notification(rb);
+        free_shm_nonblocking(rb);
     } else if (strcmp(mode, "shm-blocking") == 0) {
         if (is_server) {
             BlockingRingBuffer* rb = setup_shm_blocking(BUFFER_SIZE, true);
@@ -230,6 +230,26 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "Lock-free Non-Blocking Shared Memory is only available on Linux\n");
         return 1;
 #endif
+    } else if (strcmp(mode, "shm-nonblocking") == 0) {
+        if (is_server) {
+            NonBlockingRingBuffer* rb = setup_shm_nonblocking(BUFFER_SIZE, true);
+            if (!rb) {
+                fprintf(stderr, "Failed to setup Non-Blocking Shared Memory server\n");
+                return 1;
+            }
+            run_shm_nonblocking_server(rb, duration_secs);
+            free_shm_nonblocking(rb);
+        } else {
+            NonBlockingRingBuffer* rb = setup_shm_nonblocking(BUFFER_SIZE, false);
+            if (!rb) {
+                fprintf(stderr, "Failed to setup Non-Blocking Shared Memory client\n");
+                return 1;
+            }
+            BenchmarkStats stats = {0};
+            run_shm_nonblocking_client(rb, duration_secs, &stats);
+            print_stats(&stats, "Non-Blocking Shared Memory");
+            free_shm_nonblocking(rb);
+        }
     } else {
         fprintf(stderr, "Invalid IPC mode: %s\n", mode);
         print_usage(argv[0]);

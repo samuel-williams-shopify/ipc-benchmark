@@ -8,7 +8,7 @@
 #include <linux/futex.h>
 #include <liburing.h>
 
-struct LockFreeURingRingBuffer {
+struct LockFreeNonBlockingRingBuffer {
     size_t read_pos;
     size_t write_pos;
     size_t size;
@@ -18,15 +18,15 @@ struct LockFreeURingRingBuffer {
     char buffer[0];
 };
 
-typedef struct LockFreeURingRingBuffer LockFreeURingRingBuffer;
+typedef struct LockFreeNonBlockingRingBuffer LockFreeNonBlockingRingBuffer;
 
 /* Setup shared memory with io_uring futex operations */
-LockFreeURingRingBuffer* setup_lockfree_uring_shared_memory(size_t size);
+LockFreeNonBlockingRingBuffer* setup_lock_free_non_blocking_shared_memory(size_t size);
 
 /* Run the Lock-free io_uring Shared Memory server benchmark */
-void run_lfushm_server(LockFreeURingRingBuffer* rb, int duration_secs);
+void run_lfnbshm_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs);
 
 /* Run the Lock-free io_uring Shared Memory client benchmark */
-void run_lfushm_client(LockFreeURingRingBuffer* rb, int duration_secs, BenchmarkStats* stats); 
+void run_lfnbshm_client(LockFreeNonBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats); 
 
 #endif /* __linux__ */

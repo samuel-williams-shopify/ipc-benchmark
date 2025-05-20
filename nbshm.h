@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include <pthread.h>
 
-struct RingBuffer {
+struct NonBlockingRingBuffer {
     pthread_mutex_t mutex;
     pthread_cond_t server_cond;
     pthread_cond_t client_cond;
@@ -19,13 +19,13 @@ struct RingBuffer {
     char buffer[0];
 };
 
-typedef struct RingBuffer RingBuffer;
+typedef struct NonBlockingRingBuffer NonBlockingRingBuffer;
 
 /* Setup shared memory with pthread mutex and condition variables */
-RingBuffer* setup_shared_memory(size_t size, bool is_server);
+NonBlockingRingBuffer* setup_non_blocking_shared_memory(size_t size, bool is_server);
 
 /* Run the Shared Memory server benchmark */
-void run_shm_server(RingBuffer* rb, int duration_secs);
+void run_nbshm_server(NonBlockingRingBuffer* rb, int duration_secs);
 
 /* Run the Shared Memory client benchmark */
-void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats); 
+void run_nbshm_client(NonBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats); 

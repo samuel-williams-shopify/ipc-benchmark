@@ -123,16 +123,16 @@ int main(int argc, char* argv[]) {
             close(sock_fd);
         }
     } else if (strcmp(mode, "nbshm") == 0) {
-        RingBuffer* rb = setup_shared_memory(BUFFER_SIZE, is_server);
+        NonBlockingRingBuffer* rb = setup_non_blocking_shared_memory(BUFFER_SIZE, is_server);
         if (rb == NULL) {
             fprintf(stderr, "Failed to setup shared memory\n");
             return 1;
         }
         if (is_server) {
-            run_shm_server(rb, duration_secs);
+            run_nbshm_server(rb, duration_secs);
         } else {
             BenchmarkStats stats = {0};
-            run_shm_client(rb, duration_secs, &stats);
+            run_nbshm_client(rb, duration_secs, &stats);
             print_stats(&stats, "NBSHM Client");
         }
         // Cleanup is handled by the server
@@ -155,13 +155,13 @@ int main(int argc, char* argv[]) {
     } else if (strcmp(mode, "lfbshm") == 0) {
 #ifdef HAVE_FUTEX
         if (is_server) {
-            LockFreeRingBuffer* rb = setup_lockfree_shared_memory(BUFFER_SIZE);
+            LockFreeBlockingRingBuffer* rb = setup_lock_free_blocking_shared_memory(BUFFER_SIZE);
             if (!rb) {
                 return 1;
             }
             run_lfbshm_server(rb, duration_secs);
         } else {
-            LockFreeRingBuffer* rb = setup_lockfree_shared_memory(BUFFER_SIZE);
+            LockFreeBlockingRingBuffer* rb = setup_lock_free_blocking_shared_memory(BUFFER_SIZE);
             if (!rb) {
                 return 1;
             }
@@ -176,13 +176,13 @@ int main(int argc, char* argv[]) {
     } else if (strcmp(mode, "lfnbshm") == 0) {
 #ifdef __linux__
         if (is_server) {
-            LockFreeRingBuffer* rb = setup_lockfree_shared_memory(BUFFER_SIZE);
+            LockFreeBlockingRingBuffer* rb = setup_lock_free_blocking_shared_memory(BUFFER_SIZE);
             if (!rb) {
                 return 1;
             }
             run_lfnbshm_server(rb, duration_secs);
         } else {
-            LockFreeRingBuffer* rb = setup_lockfree_shared_memory(BUFFER_SIZE);
+            LockFreeBlockingRingBuffer* rb = setup_lock_free_blocking_shared_memory(BUFFER_SIZE);
             if (!rb) {
                 return 1;
             }

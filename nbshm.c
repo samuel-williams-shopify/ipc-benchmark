@@ -13,7 +13,7 @@
 
 /* Thread data structure */
 typedef struct {
-    RingBuffer* rb;
+    NonBlockingRingBuffer* rb;
     Interrupt* intr;  // notification interrupt
     bool is_server;
     volatile bool should_exit;
@@ -22,7 +22,7 @@ typedef struct {
 /* Thread function that waits on mutex and signals eventfd */
 static void* notification_thread(void* arg) {
     ThreadData* data = (ThreadData*)arg;
-    RingBuffer* rb = data->rb;
+    NonBlockingRingBuffer* rb = data->rb;
     
     printf("%s thread started\n", data->is_server ? "Server" : "Client");
     
@@ -61,7 +61,7 @@ static void* notification_thread(void* arg) {
 }
 
 /* Read a message from the ring buffer */
-static bool ring_buffer_read(RingBuffer* rb, void* data, size_t max_len, size_t* bytes_read) {
+static bool ring_buffer_read(NonBlockingRingBuffer* rb, void* data, size_t max_len, size_t* bytes_read) {
     *bytes_read = 0;
     
     // We assume the mutex is already locked by the caller
@@ -119,7 +119,7 @@ static bool ring_buffer_read(RingBuffer* rb, void* data, size_t max_len, size_t*
 }
 
 /* Write a message from client to server */
-static bool ring_buffer_write_client_to_server(RingBuffer* rb, const void* data, size_t len) {
+static bool ring_buffer_write_client_to_server(NonBlockingRingBuffer* rb, const void* data, size_t len) {
     pthread_mutex_lock(&rb->mutex);
     
     // Wait for space in the buffer
@@ -175,7 +175,7 @@ static bool ring_buffer_write_client_to_server(RingBuffer* rb, const void* data,
 }
 
 /* Write a message from server to client */
-static bool ring_buffer_write_server_to_client(RingBuffer* rb, const void* data, size_t len) {
+static bool ring_buffer_write_server_to_client(NonBlockingRingBuffer* rb, const void* data, size_t len) {
     if (len > rb->size / 2) {
         // Prevent a single message from taking more than half the buffer
         return false;
@@ -198,18 +198,17 @@ static bool ring_buffer_write_server_to_client(RingBuffer* rb, const void* data,
     }
     
     // Write the message length first
-    uint32_t msg_len = len;
     size_t write_pos = rb->write_pos;
     
     if (write_pos + sizeof(uint32_t) > rb->size) {
         // Wrap around for the length
         size_t first_chunk = rb->size - write_pos;
-        memcpy(rb->buffer + write_pos, &msg_len, first_chunk);
-        memcpy(rb->buffer, ((char*)&msg_len) + first_chunk, sizeof(uint32_t) - first_chunk);
+        memcpy(rb->buffer + write_pos, &len, first_chunk);
+        memcpy(rb->buffer, ((char*)&len) + first_chunk, sizeof(uint32_t) - first_chunk);
         write_pos = sizeof(uint32_t) - first_chunk;
     } else {
         // Write the length field
-        memcpy(rb->buffer + write_pos, &msg_len, sizeof(uint32_t));
+        memcpy(rb->buffer + write_pos, &len, sizeof(uint32_t));
         write_pos += sizeof(uint32_t);
         if (write_pos == rb->size) {
             write_pos = 0;
@@ -240,107 +239,66 @@ static bool ring_buffer_write_server_to_client(RingBuffer* rb, const void* data,
     pthread_cond_signal(&rb->client_cond);
     
     pthread_mutex_unlock(&rb->mutex);
+    
     return true;
 }
 
 /* Setup shared memory with pthread mutex and condition variables */
-RingBuffer* setup_shared_memory(size_t size, bool is_server) {
+NonBlockingRingBuffer* setup_non_blocking_shared_memory(size_t size, bool is_server) {
     int fd = -1;
-    RingBuffer* rb = NULL;
-    size_t total_size;
-    total_size = sizeof(RingBuffer) + size;
+    NonBlockingRingBuffer* rb = NULL;
+    size_t total_size = sizeof(NonBlockingRingBuffer) + size;
 
-    size_t page_size = getpagesize();
-    total_size = (total_size + page_size - 1) & ~(page_size - 1);
+    // Create and truncate shared memory
+    shm_unlink(SHM_NAME); // Ensure old segment is gone
+    fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
+    if (fd == -1) {
+        perror("shm_open");
+        return NULL;
+    }
 
-    if (is_server) {
-        // Server: create and truncate
-        shm_unlink(SHM_NAME); // Ensure old segment is gone
-        fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
-        if (fd == -1) {
-            perror("shm_open (server)");
-            return NULL;
-        }
-        if (ftruncate(fd, total_size) == -1) {
-            perror("ftruncate");
-            close(fd);
-            shm_unlink(SHM_NAME);
-            return NULL;
-        }
-    } else {
-        // Client: retry open until available
-        int retries = 10;
-        while (retries--) {
-            fd = shm_open(SHM_NAME, O_RDWR, 0666);
-            if (fd != -1) break;
-            sleep(1);
-        }
-        if (fd == -1) {
-            perror("shm_open (client)");
-            return NULL;
-        }
+    if (ftruncate(fd, total_size) == -1) {
+        perror("ftruncate");
+        close(fd);
+        shm_unlink(SHM_NAME);
+        return NULL;
     }
 
     rb = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (rb == MAP_FAILED) {
         perror("mmap");
         close(fd);
-        if (is_server) shm_unlink(SHM_NAME);
+        shm_unlink(SHM_NAME);
         return NULL;
     }
-    if (is_server) {
-        pthread_mutexattr_t mutex_attr;
-        pthread_mutexattr_init(&mutex_attr);
-        pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
-        if (pthread_mutex_init(&rb->mutex, &mutex_attr) != 0) {
-            perror("pthread_mutex_init");
-            munmap(rb, total_size);
-            close(fd);
-            shm_unlink(SHM_NAME);
-            pthread_mutexattr_destroy(&mutex_attr);
-            return NULL;
-        }
-        pthread_mutexattr_destroy(&mutex_attr);
-        pthread_condattr_t cond_attr;
-        pthread_condattr_init(&cond_attr);
-        pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
-        if (pthread_cond_init(&rb->server_cond, &cond_attr) != 0 ||
-            pthread_cond_init(&rb->client_cond, &cond_attr) != 0) {
-            perror("pthread_cond_init");
-            pthread_mutex_destroy(&rb->mutex);
-            munmap(rb, total_size);
-            close(fd);
-            shm_unlink(SHM_NAME);
-            pthread_condattr_destroy(&cond_attr);
-            return NULL;
-        }
-        pthread_condattr_destroy(&cond_attr);
-        rb->read_pos = 0;
-        rb->write_pos = 0;
-        rb->size = size;
-        rb->message_available = false;
-        rb->response_available = false;
-        rb->ready = true;
-    }
-    if (!is_server) {
-        // Wait for server to set ready flag
-        int wait_count = 0;
-        while (!rb->ready) {
-            usleep(1000); // 1ms
-            if (++wait_count > 5000) { // 5 seconds max
-                fprintf(stderr, "Timeout waiting for server to initialize shared memory\n");
-                munmap(rb, total_size);
-                close(fd);
-                return NULL;
-            }
-        }
-    }
+
+    // Initialize the ring buffer
+    pthread_mutexattr_t mutex_attr;
+    pthread_mutexattr_init(&mutex_attr);
+    pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
+    pthread_mutex_init(&rb->mutex, &mutex_attr);
+    pthread_mutexattr_destroy(&mutex_attr);
+
+    pthread_condattr_t cond_attr;
+    pthread_condattr_init(&cond_attr);
+    pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
+    pthread_cond_init(&rb->server_cond, &cond_attr);
+    pthread_cond_init(&rb->client_cond, &cond_attr);
+    pthread_condattr_destroy(&cond_attr);
+
+    rb->read_pos = 0;
+    rb->write_pos = 0;
+    rb->size = size;
+    rb->message_available = false;
+    rb->response_available = false;
+    rb->ready = is_server; // Set ready based on whether it's a server or client
+
     close(fd);
     return rb;
 }
 
 /* Run the Shared Memory server benchmark */
-void run_shm_server(RingBuffer* rb, int duration_secs) {
+void run_nbshm_server(NonBlockingRingBuffer* rb, int duration_secs) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
@@ -426,23 +384,23 @@ void run_shm_server(RingBuffer* rb, int duration_secs) {
     // Cleanup
     interrupt_destroy(intr);
     free(buffer);
-    munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
+    munmap(rb, sizeof(NonBlockingRingBuffer) + BUFFER_SIZE);
     shm_unlink(SHM_NAME);
 }
 
 /* Run the Shared Memory client benchmark */
-void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
+void run_nbshm_client(NonBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
-        munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
+        munmap(rb, sizeof(NonBlockingRingBuffer) + BUFFER_SIZE);
         return;
     }
     uint64_t* latencies = malloc(sizeof(uint64_t) * MAX_LATENCIES);
     if (!latencies) {
         perror("malloc");
         free(buffer);
-        munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
+        munmap(rb, sizeof(NonBlockingRingBuffer) + BUFFER_SIZE);
         return;
     }
     size_t latency_count = 0;
@@ -452,7 +410,7 @@ void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
     if (!intr) {
         free(buffer);
         free(latencies);
-        munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
+        munmap(rb, sizeof(NonBlockingRingBuffer) + BUFFER_SIZE);
         return;
     }
 
@@ -469,7 +427,7 @@ void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
         interrupt_destroy(intr);
         free(buffer);
         free(latencies);
-        munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
+        munmap(rb, sizeof(NonBlockingRingBuffer) + BUFFER_SIZE);
         return;
     }
 
@@ -638,5 +596,5 @@ cleanup:
     interrupt_destroy(intr);
     free(buffer);
     free(latencies);
-    munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
+    munmap(rb, sizeof(NonBlockingRingBuffer) + BUFFER_SIZE);
 } 

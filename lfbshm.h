@@ -13,7 +13,7 @@
 
 #define CACHE_LINE_SIZE 64
 
-struct LockFreeRingBuffer {
+struct LockFreeBlockingRingBuffer {
     // Server-side fields (aligned to cache line)
     atomic_uint write_pos;
     atomic_uint server_futex;
@@ -30,7 +30,7 @@ struct LockFreeRingBuffer {
     char buffer[0];
 } __attribute__((aligned(CACHE_LINE_SIZE)));
 
-typedef struct LockFreeRingBuffer LockFreeRingBuffer;
+typedef struct LockFreeBlockingRingBuffer LockFreeBlockingRingBuffer;
 
 static inline int futex_wait(volatile uint32_t* uaddr, uint32_t val) {
     return syscall(SYS_futex, uaddr, FUTEX_WAIT, val, NULL, NULL, 0);
@@ -54,8 +54,8 @@ static inline uint32_t atomic_fetch_add_release(atomic_uint* ptr, uint32_t val) 
 }
 
 // Function declarations
-LockFreeRingBuffer* setup_lockfree_shared_memory(size_t size);
-void run_lfshm_server(LockFreeRingBuffer* rb, int duration_secs);
-void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats* stats);
+LockFreeBlockingRingBuffer* setup_lock_free_blocking_shared_memory(size_t size);
+void run_lfbshm_server(LockFreeBlockingRingBuffer* rb, int duration_secs);
+void run_lfbshm_client(LockFreeBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats);
 
 #endif /* __linux__ */ 

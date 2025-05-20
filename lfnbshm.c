@@ -167,7 +167,7 @@ static bool ring_buffer_write(LockFreeURingRingBuffer* rb, const void* data, siz
 }
 
 /* Run the Lock-free io_uring Shared Memory server benchmark */
-void run_lfushm_server(LockFreeURingRingBuffer* rb, int duration_secs) {
+void run_lfnbshm_server(LockFreeURingRingBuffer* rb, int duration_secs) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
@@ -240,7 +240,7 @@ void run_lfushm_server(LockFreeURingRingBuffer* rb, int duration_secs) {
 }
 
 /* Run the Lock-free io_uring Shared Memory client benchmark */
-void run_lfushm_client(LockFreeURingRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
+void run_lfnbshm_client(LockFreeURingRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");

@@ -11,14 +11,14 @@
 #include <sys/select.h>
 
 /* Setup lock-free shared memory */
-LockFreeRingBuffer* setup_lockfree_shared_memory(size_t size) {
+LockFreeBlockingRingBuffer* setup_lock_free_blocking_shared_memory(size_t size) {
     int fd = -1;
-    LockFreeRingBuffer* rb = NULL;
-    size_t total_size = sizeof(LockFreeRingBuffer) + size;
+    LockFreeBlockingRingBuffer* rb = NULL;
+    size_t total_size = sizeof(LockFreeBlockingRingBuffer) + size;
 
     // Ensure size is power of 2 for faster modulo operations
     size = 1ULL << (64 - __builtin_clzll(size - 1));
-    total_size = sizeof(LockFreeRingBuffer) + size;
+    total_size = sizeof(LockFreeBlockingRingBuffer) + size;
 
     size_t page_size = getpagesize();
     total_size = (total_size + page_size - 1) & ~(page_size - 1);
@@ -59,7 +59,7 @@ LockFreeRingBuffer* setup_lockfree_shared_memory(size_t size) {
 }
 
 /* Read a message from the lock-free ring buffer */
-static bool ring_buffer_read(LockFreeRingBuffer* rb, void* data, size_t max_len, size_t* bytes_read) {
+static bool ring_buffer_read(LockFreeBlockingRingBuffer* rb, void* data, size_t max_len, size_t* bytes_read) {
     *bytes_read = 0;
     
     // Check if the buffer is empty
@@ -116,7 +116,7 @@ static bool ring_buffer_read(LockFreeRingBuffer* rb, void* data, size_t max_len,
 }
 
 /* Write a message to the lock-free ring buffer */
-static bool ring_buffer_write(LockFreeRingBuffer* rb, const void* data, size_t len) {
+static bool ring_buffer_write(LockFreeBlockingRingBuffer* rb, const void* data, size_t len) {
     if (len > rb->size / 2) {
         // Prevent a single message from taking more than half the buffer
         return false;
@@ -178,7 +178,7 @@ static bool ring_buffer_write(LockFreeRingBuffer* rb, const void* data, size_t l
 }
 
 /* Run the Lock-free Shared Memory server benchmark */
-void run_lfshm_server(LockFreeRingBuffer* rb, int duration_secs) {
+void run_lfbshm_server(LockFreeBlockingRingBuffer* rb, int duration_secs) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
@@ -222,23 +222,23 @@ void run_lfshm_server(LockFreeRingBuffer* rb, int duration_secs) {
     
     // Cleanup
     free(buffer);
-    munmap(rb, sizeof(LockFreeRingBuffer) + BUFFER_SIZE);
+    munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
     shm_unlink(SHM_NAME);
 }
 
 /* Run the Lock-free Shared Memory client benchmark */
-void run_lfshm_client(LockFreeRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
+void run_lfbshm_client(LockFreeBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
-        munmap(rb, sizeof(LockFreeRingBuffer) + BUFFER_SIZE);
+        munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
         return;
     }
     uint64_t* latencies = malloc(sizeof(uint64_t) * MAX_LATENCIES);
     if (!latencies) {
         perror("malloc");
         free(buffer);
-        munmap(rb, sizeof(LockFreeRingBuffer) + BUFFER_SIZE);
+        munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
         return;
     }
     size_t latency_count = 0;
@@ -378,5 +378,5 @@ cleanup:
     // Cleanup resources
     free(buffer);
     free(latencies);
-    munmap(rb, sizeof(LockFreeRingBuffer) + BUFFER_SIZE);
+    munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
 } 

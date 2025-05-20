@@ -27,6 +27,7 @@ struct LockFreeBlockingRingBuffer {
     // Shared fields
     size_t size;
     atomic_bool ready;
+    bool is_server;
     char buffer[0];
 } __attribute__((aligned(CACHE_LINE_SIZE)));
 
@@ -54,8 +55,9 @@ static inline uint32_t atomic_fetch_add_release(atomic_uint* ptr, uint32_t val) 
 }
 
 // Function declarations
-LockFreeBlockingRingBuffer* setup_lock_free_blocking_shared_memory(size_t size);
+LockFreeBlockingRingBuffer* setup_lfbshm(size_t size, bool is_server);
 void run_lfbshm_server(LockFreeBlockingRingBuffer* rb, int duration_secs);
 void run_lfbshm_client(LockFreeBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats);
+void free_lfbshm(LockFreeBlockingRingBuffer* rb);
 
 #endif /* __linux__ */ 

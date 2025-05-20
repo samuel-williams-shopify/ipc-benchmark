@@ -244,7 +244,7 @@ static bool ring_buffer_write_server_to_client(NonBlockingRingBuffer* rb, const 
 }
 
 /* Setup shared memory with pthread mutex and condition variables */
-NonBlockingRingBuffer* setup_non_blocking_shared_memory(size_t size, bool is_server) {
+NonBlockingRingBuffer* setup_nbshm(size_t size, bool is_server) {
     int fd = -1;
     NonBlockingRingBuffer* rb = NULL;
     size_t total_size = sizeof(NonBlockingRingBuffer) + size;
@@ -291,10 +291,18 @@ NonBlockingRingBuffer* setup_non_blocking_shared_memory(size_t size, bool is_ser
     rb->size = size;
     rb->message_available = false;
     rb->response_available = false;
-    rb->ready = is_server; // Set ready based on whether it's a server or client
+    rb->ready = is_server;
+    rb->is_server = is_server;
 
     close(fd);
     return rb;
+}
+
+void free_nbshm(NonBlockingRingBuffer* rb) {
+    munmap(rb, sizeof(NonBlockingRingBuffer) + rb->size);
+    if (rb->is_server) {
+        shm_unlink(SHM_NAME);
+    }
 }
 
 /* Run the Shared Memory server benchmark */

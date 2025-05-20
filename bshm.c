@@ -11,7 +11,7 @@
 #include <pthread.h>
 
 /* Setup shared memory with pthread mutex and condition variables */
-BlockingRingBuffer* setup_blocking_shared_memory(size_t size, bool is_server) {
+BlockingRingBuffer* setup_bshm(size_t size, bool is_server) {
     int fd = -1;
     BlockingRingBuffer* rb = NULL;
     size_t total_size = sizeof(BlockingRingBuffer) + size;
@@ -58,7 +58,8 @@ BlockingRingBuffer* setup_blocking_shared_memory(size_t size, bool is_server) {
     rb->size = size;
     rb->message_available = false;
     rb->response_available = false;
-    rb->ready = is_server; // Set ready based on whether it's a server or client
+    rb->ready = is_server;
+    rb->is_server = is_server;
 
     close(fd);
     return rb;
@@ -354,4 +355,11 @@ cleanup:
     free(buffer);
     free(latencies);
     munmap(rb, sizeof(BlockingRingBuffer) + BUFFER_SIZE);
+}
+
+void free_bshm(BlockingRingBuffer* rb) {
+    munmap(rb, sizeof(BlockingRingBuffer) + rb->size);
+    if (rb->is_server) {
+        shm_unlink(SHM_NAME);
+    }
 } 

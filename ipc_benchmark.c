@@ -106,26 +106,28 @@ int main(int argc, char* argv[]) {
 
     if (strcmp(mode, "uds") == 0) {
         if (is_server) {
-            int sock_fd = setup_uds_server(SOCKET_PATH);
-            if (sock_fd == -1) {
+            UDSState* state = setup_uds_server(SOCKET_PATH);
+            if (!state) {
+                fprintf(stderr, "Failed to setup Unix Domain Socket server\n");
                 return 1;
             }
-            run_uds_server(sock_fd, duration_secs);
-            close(sock_fd);
+            run_uds_server(state, duration_secs);
+            free_uds(state);
         } else {
-            int sock_fd = setup_uds_client(SOCKET_PATH);
-            if (sock_fd == -1) {
+            UDSState* state = setup_uds_client(SOCKET_PATH);
+            if (!state) {
+                fprintf(stderr, "Failed to setup Unix Domain Socket client\n");
                 return 1;
             }
             BenchmarkStats stats = {0};
-            run_uds_client(sock_fd, duration_secs, &stats);
-            print_stats(&stats, "UDS Client");
-            close(sock_fd);
+            run_uds_client(state, duration_secs, &stats);
+            print_stats(&stats, "Unix Domain Socket");
+            free_uds(state);
         }
     } else if (strcmp(mode, "nbshm") == 0) {
-        NonBlockingRingBuffer* rb = setup_non_blocking_shared_memory(BUFFER_SIZE, is_server);
+        NonBlockingRingBuffer* rb = setup_nbshm(BUFFER_SIZE, is_server);
         if (rb == NULL) {
-            fprintf(stderr, "Failed to setup shared memory\n");
+            fprintf(stderr, "Failed to setup Non-Blocking Shared Memory\n");
             return 1;
         }
         if (is_server) {
@@ -133,69 +135,81 @@ int main(int argc, char* argv[]) {
         } else {
             BenchmarkStats stats = {0};
             run_nbshm_client(rb, duration_secs, &stats);
-            print_stats(&stats, "NBSHM Client");
+            print_stats(&stats, "Non-Blocking Shared Memory");
         }
-        // Cleanup is handled by the server
+        free_nbshm(rb);
     } else if (strcmp(mode, "bshm") == 0) {
         if (is_server) {
-            BlockingRingBuffer* rb = setup_blocking_shared_memory(BUFFER_SIZE, true);
+            BlockingRingBuffer* rb = setup_bshm(BUFFER_SIZE, true);
             if (!rb) {
+                fprintf(stderr, "Failed to setup Blocking Shared Memory server\n");
                 return 1;
             }
             run_bshm_server(rb, duration_secs);
+            free_bshm(rb);
         } else {
-            BlockingRingBuffer* rb = setup_blocking_shared_memory(BUFFER_SIZE, false);
+            BlockingRingBuffer* rb = setup_bshm(BUFFER_SIZE, false);
             if (!rb) {
+                fprintf(stderr, "Failed to setup Blocking Shared Memory client\n");
                 return 1;
             }
             BenchmarkStats stats = {0};
             run_bshm_client(rb, duration_secs, &stats);
-            print_stats(&stats, "BSHM Client");
+            print_stats(&stats, "Blocking Shared Memory");
+            free_bshm(rb);
         }
     } else if (strcmp(mode, "lfbshm") == 0) {
 #ifdef HAVE_FUTEX
         if (is_server) {
-            LockFreeBlockingRingBuffer* rb = setup_lock_free_blocking_shared_memory(BUFFER_SIZE);
+            LockFreeBlockingRingBuffer* rb = setup_lfbshm(BUFFER_SIZE, true);
             if (!rb) {
+                fprintf(stderr, "Failed to setup Lock-Free Blocking Shared Memory server\n");
                 return 1;
             }
             run_lfbshm_server(rb, duration_secs);
+            free_lfbshm(rb);
         } else {
-            LockFreeBlockingRingBuffer* rb = setup_lock_free_blocking_shared_memory(BUFFER_SIZE);
+            LockFreeBlockingRingBuffer* rb = setup_lfbshm(BUFFER_SIZE, false);
             if (!rb) {
+                fprintf(stderr, "Failed to setup Lock-Free Blocking Shared Memory client\n");
                 return 1;
             }
             BenchmarkStats stats = {0};
             run_lfbshm_client(rb, duration_secs, &stats);
-            print_stats(&stats, "LFBSHM Client");
+            print_stats(&stats, "Lock-Free Blocking Shared Memory");
+            free_lfbshm(rb);
         }
 #else
-        fprintf(stderr, "Lock-free shared memory mode is only available on Linux\n");
+        fprintf(stderr, "Lock-Free Blocking Shared Memory is only available on Linux\n");
         return 1;
 #endif
     } else if (strcmp(mode, "lfnbshm") == 0) {
 #ifdef __linux__
         if (is_server) {
-            LockFreeBlockingRingBuffer* rb = setup_lock_free_blocking_shared_memory(BUFFER_SIZE);
+            LockFreeNonBlockingRingBuffer* rb = setup_lfnbshm(BUFFER_SIZE, true);
             if (!rb) {
+                fprintf(stderr, "Failed to setup Lock-Free Non-Blocking Shared Memory server\n");
                 return 1;
             }
             run_lfnbshm_server(rb, duration_secs);
+            free_lfnbshm(rb);
         } else {
-            LockFreeBlockingRingBuffer* rb = setup_lock_free_blocking_shared_memory(BUFFER_SIZE);
+            LockFreeNonBlockingRingBuffer* rb = setup_lfnbshm(BUFFER_SIZE, false);
             if (!rb) {
+                fprintf(stderr, "Failed to setup Lock-Free Non-Blocking Shared Memory client\n");
                 return 1;
             }
             BenchmarkStats stats = {0};
             run_lfnbshm_client(rb, duration_secs, &stats);
-            print_stats(&stats, "LFNBSHM Client");
+            print_stats(&stats, "Lock-Free Non-Blocking Shared Memory");
+            free_lfnbshm(rb);
         }
 #else
-        fprintf(stderr, "Lock-free io_uring shared memory mode is only available on Linux\n");
+        fprintf(stderr, "Lock-Free Non-Blocking Shared Memory is only available on Linux\n");
         return 1;
 #endif
     } else {
-        fprintf(stderr, "Invalid mode: %s\n", mode);
+        fprintf(stderr, "Invalid IPC mode: %s\n", mode);
         print_usage(argv[0]);
         return 1;
     }

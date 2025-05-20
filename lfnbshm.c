@@ -14,10 +14,10 @@
 #define SHM_NAME "/lfushm_ring_buffer"
 
 /* Setup shared memory with io_uring futex operations */
-LockFreeURingRingBuffer* setup_lockfree_uring_shared_memory(size_t size) {
+LockFreeNonBlockingRingBuffer* setup_lfnbshm(size_t size, bool is_server) {
     int fd = -1;
-    LockFreeURingRingBuffer* rb = NULL;
-    size_t total_size = sizeof(LockFreeURingRingBuffer) + size;
+    LockFreeNonBlockingRingBuffer* rb = NULL;
+    size_t total_size = sizeof(LockFreeNonBlockingRingBuffer) + size;
 
     // Create and truncate shared memory
     shm_unlink(SHM_NAME); // Ensure old segment is gone
@@ -48,14 +48,15 @@ LockFreeURingRingBuffer* setup_lockfree_uring_shared_memory(size_t size) {
     rb->size = size;
     rb->message_available = false;
     rb->response_available = false;
-    rb->ready = true;
+    rb->ready = is_server;
+    rb->is_server = is_server;
 
     close(fd);
     return rb;
 }
 
 /* Read a message from the ring buffer */
-static bool ring_buffer_read(LockFreeURingRingBuffer* rb, void* data, size_t max_len, size_t* bytes_read) {
+static bool ring_buffer_read(LockFreeNonBlockingRingBuffer* rb, void* data, size_t max_len, size_t* bytes_read) {
     *bytes_read = 0;
     
     // Check if the buffer is empty
@@ -112,7 +113,7 @@ static bool ring_buffer_read(LockFreeURingRingBuffer* rb, void* data, size_t max
 }
 
 /* Write a message to the ring buffer */
-static bool ring_buffer_write(LockFreeURingRingBuffer* rb, const void* data, size_t len) {
+static bool ring_buffer_write(LockFreeNonBlockingRingBuffer* rb, const void* data, size_t len) {
     if (len > rb->size / 2) {
         // Prevent a single message from taking more than half the buffer
         return false;
@@ -167,7 +168,7 @@ static bool ring_buffer_write(LockFreeURingRingBuffer* rb, const void* data, siz
 }
 
 /* Run the Lock-free io_uring Shared Memory server benchmark */
-void run_lfnbshm_server(LockFreeURingRingBuffer* rb, int duration_secs) {
+void run_lfnbshm_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
@@ -235,23 +236,23 @@ void run_lfnbshm_server(LockFreeURingRingBuffer* rb, int duration_secs) {
     // Cleanup
     io_uring_queue_exit(&ring);
     free(buffer);
-    munmap(rb, sizeof(LockFreeURingRingBuffer) + BUFFER_SIZE);
+    munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + BUFFER_SIZE);
     shm_unlink(SHM_NAME);
 }
 
 /* Run the Lock-free io_uring Shared Memory client benchmark */
-void run_lfnbshm_client(LockFreeURingRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
+void run_lfnbshm_client(LockFreeNonBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
-        munmap(rb, sizeof(LockFreeURingRingBuffer) + BUFFER_SIZE);
+        munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + BUFFER_SIZE);
         return;
     }
     uint64_t* latencies = malloc(sizeof(uint64_t) * MAX_LATENCIES);
     if (!latencies) {
         perror("malloc");
         free(buffer);
-        munmap(rb, sizeof(LockFreeURingRingBuffer) + BUFFER_SIZE);
+        munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + BUFFER_SIZE);
         return;
     }
     size_t latency_count = 0;
@@ -262,7 +263,7 @@ void run_lfnbshm_client(LockFreeURingRingBuffer* rb, int duration_secs, Benchmar
         perror("io_uring_queue_init");
         free(buffer);
         free(latencies);
-        munmap(rb, sizeof(LockFreeURingRingBuffer) + BUFFER_SIZE);
+        munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + BUFFER_SIZE);
         return;
     }
 
@@ -424,5 +425,12 @@ cleanup:
     io_uring_queue_exit(&ring);
     free(buffer);
     free(latencies);
-    munmap(rb, sizeof(LockFreeURingRingBuffer) + BUFFER_SIZE);
+    munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + BUFFER_SIZE);
+}
+
+void free_lfnbshm(LockFreeNonBlockingRingBuffer* rb) {
+    munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + rb->size);
+    if (rb->is_server) {
+        shm_unlink(SHM_NAME);
+    }
 } 

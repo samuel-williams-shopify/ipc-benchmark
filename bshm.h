@@ -15,16 +15,19 @@ struct BlockingRingBuffer {
     bool message_available;
     bool response_available;
     volatile bool ready;
+    bool is_server;
     char buffer[0];
 };
 
 typedef struct BlockingRingBuffer BlockingRingBuffer;
 
 /* Setup shared memory with pthread mutex and condition variables */
-BlockingRingBuffer* setup_blocking_shared_memory(size_t size, bool is_server);
+BlockingRingBuffer* setup_bshm(size_t size, bool is_server);
 
 /* Run the Blocking Shared Memory server benchmark */
 void run_bshm_server(BlockingRingBuffer* rb, int duration_secs);
 
 /* Run the Blocking Shared Memory client benchmark */
-void run_bshm_client(BlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats); 
+void run_bshm_client(BlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats);
+
+void free_bshm(BlockingRingBuffer* rb); 

@@ -11,7 +11,7 @@
 #include <sys/select.h>
 
 /* Setup lock-free shared memory */
-LockFreeBlockingRingBuffer* setup_lock_free_blocking_shared_memory(size_t size) {
+LockFreeBlockingRingBuffer* setup_lfbshm(size_t size, bool is_server) {
     int fd = -1;
     LockFreeBlockingRingBuffer* rb = NULL;
     size_t total_size = sizeof(LockFreeBlockingRingBuffer) + size;
@@ -53,6 +53,7 @@ LockFreeBlockingRingBuffer* setup_lock_free_blocking_shared_memory(size_t size) 
     atomic_store_release(&rb->client_futex, 0);
     rb->size = size;
     atomic_store_explicit(&rb->ready, true, memory_order_release);
+    rb->is_server = is_server;
 
     close(fd);
     return rb;
@@ -379,4 +380,11 @@ cleanup:
     free(buffer);
     free(latencies);
     munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
+}
+
+void free_lfbshm(LockFreeBlockingRingBuffer* rb) {
+    munmap(rb, sizeof(LockFreeBlockingRingBuffer) + rb->size);
+    if (rb->is_server) {
+        shm_unlink(SHM_NAME);
+    }
 } 

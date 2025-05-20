@@ -21,6 +21,7 @@
 #include "uds.h"
 #include "shm.h"
 #include "lfshm.h"
+#include "bshm.h"
 
 /* Function prototypes */
 void print_usage(const char* prog_name);
@@ -31,7 +32,7 @@ void print_usage(const char* prog_name) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -s, --server           Run as server\n");
     fprintf(stderr, "  -c, --client           Run as client\n");
-    fprintf(stderr, "  -m, --mode MODE        IPC mode (uds, shm, lfshm)\n");
+    fprintf(stderr, "  -m, --mode MODE        IPC mode (uds, shm, bshm, lfshm)\n");
     fprintf(stderr, "  -d, --duration SECS    Benchmark duration in seconds\n");
     fprintf(stderr, "  -h, --help             Show this help message\n");
 }
@@ -133,6 +134,22 @@ int main(int argc, char* argv[]) {
             BenchmarkStats stats = {0};
             run_shm_client(rb, duration_secs, &stats);
             print_stats(&stats, "SHM Client");
+        }
+    } else if (strcmp(mode, "bshm") == 0) {
+        if (is_server) {
+            BlockingRingBuffer* rb = setup_blocking_shared_memory(BUFFER_SIZE, true);
+            if (!rb) {
+                return 1;
+            }
+            run_bshm_server(rb, duration_secs);
+        } else {
+            BlockingRingBuffer* rb = setup_blocking_shared_memory(BUFFER_SIZE, false);
+            if (!rb) {
+                return 1;
+            }
+            BenchmarkStats stats = {0};
+            run_bshm_client(rb, duration_secs, &stats);
+            print_stats(&stats, "BSHM Client");
         }
     } else if (strcmp(mode, "lfshm") == 0) {
 #ifdef HAVE_FUTEX

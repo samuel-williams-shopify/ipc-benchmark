@@ -7,7 +7,7 @@
 
 /* Configuration constants */
 #define SOCKET_PATH "/tmp/ipc_benchmark_socket"
-#define SHM_NAME "/tmp/ipc_benchmark_shm"
+#define SHM_NAME "/ipc_benchmark_shm"
 #define MAX_MSG_SIZE (128 * 1024)  // 128KiB max message size
 #define BUFFER_SIZE (4 * 1024 * 1024)  // 4MiB ring buffer
 #define WARMUP_DURATION 1  // Warmup duration in seconds

@@ -18,13 +18,14 @@
 
 #include "interrupt.h"
 #include "benchmark.h"
-#include "uds.h"
+#include "buds.h"
 #include "nbshm.h"
 #include "bshm.h"
 #ifdef __linux__
 #include "lfbshm.h"
 #include "lfnbshm.h"
 #endif
+#include "nbuds.h"
 
 /* Function prototypes */
 void print_usage(const char* prog_name);
@@ -35,7 +36,7 @@ void print_usage(const char* prog_name) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -s, --server           Run as server\n");
     fprintf(stderr, "  -c, --client           Run as client\n");
-    fprintf(stderr, "  -m, --mode MODE        IPC mode (uds, nbshm, bshm, lfbshm, lfnbshm)\n");
+    fprintf(stderr, "  -m, --mode MODE        IPC mode (buds, nbuds, nbshm, bshm, lfbshm, lfnbshm)\n");
     fprintf(stderr, "  -d, --duration SECS    Benchmark duration in seconds\n");
     fprintf(stderr, "  -h, --help             Show this help message\n");
 }
@@ -104,25 +105,45 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (strcmp(mode, "uds") == 0) {
+    if (strcmp(mode, "buds") == 0) {
         if (is_server) {
-            UDSState* state = setup_uds_server(SOCKET_PATH);
+            BUDSState* state = setup_buds_server(SOCKET_PATH);
             if (!state) {
-                fprintf(stderr, "Failed to setup Unix Domain Socket server\n");
+                fprintf(stderr, "Failed to setup Blocking Unix Domain Socket server\n");
                 return 1;
             }
-            run_uds_server(state, duration_secs);
-            free_uds(state);
+            run_buds_server(state, duration_secs);
+            free_buds(state);
         } else {
-            UDSState* state = setup_uds_client(SOCKET_PATH);
+            BUDSState* state = setup_buds_client(SOCKET_PATH);
             if (!state) {
-                fprintf(stderr, "Failed to setup Unix Domain Socket client\n");
+                fprintf(stderr, "Failed to setup Blocking Unix Domain Socket client\n");
                 return 1;
             }
             BenchmarkStats stats = {0};
-            run_uds_client(state, duration_secs, &stats);
-            print_stats(&stats, "Unix Domain Socket");
-            free_uds(state);
+            run_buds_client(state, duration_secs, &stats);
+            print_stats(&stats, "Blocking Unix Domain Socket");
+            free_buds(state);
+        }
+    } else if (strcmp(mode, "nbuds") == 0) {
+        if (is_server) {
+            NBUDSState* state = setup_nbuds_server(SOCKET_PATH);
+            if (!state) {
+                fprintf(stderr, "Failed to setup Non-Blocking Unix Domain Socket server\n");
+                return 1;
+            }
+            run_nbuds_server(state, duration_secs);
+            free_nbuds(state);
+        } else {
+            NBUDSState* state = setup_nbuds_client(SOCKET_PATH);
+            if (!state) {
+                fprintf(stderr, "Failed to setup Non-Blocking Unix Domain Socket client\n");
+                return 1;
+            }
+            BenchmarkStats stats = {0};
+            run_nbuds_client(state, duration_secs, &stats);
+            print_stats(&stats, "Non-Blocking Unix Domain Socket");
+            free_nbuds(state);
         }
     } else if (strcmp(mode, "nbshm") == 0) {
         NonBlockingRingBuffer* rb = setup_nbshm(BUFFER_SIZE, is_server);

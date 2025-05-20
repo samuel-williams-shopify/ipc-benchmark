@@ -8,10 +8,10 @@ UNAME_S := $(shell uname -s)
 # Platform-specific settings
 ifeq ($(UNAME_S),Linux)
     LDFLAGS := -lpthread -lrt
-    SRC := ipc_benchmark.c uds.c nbshm.c lfbshm.c bshm.c lfushm.c benchmark.c interrupt.c
+    SRC := ipc_benchmark.c buds.c nbuds.c nbshm.c bshm.c lfbshm.c lfnbshm.c benchmark.c interrupt.c
 else
     LDFLAGS := -lpthread
-    SRC := ipc_benchmark.c uds.c nbshm.c bshm.c benchmark.c interrupt.c
+    SRC := ipc_benchmark.c buds.c nbuds.c nbshm.c bshm.c benchmark.c interrupt.c
 endif
 
 # Target executable
@@ -52,8 +52,11 @@ define run_benchmark
 endef
 
 # Run the benchmarks
-run-uds: $(TARGET)
-	$(call run_benchmark,uds)
+run-buds: $(TARGET)
+	$(call run_benchmark,buds)
+
+run-nbuds: $(TARGET)
+	$(call run_benchmark,nbuds)
 
 run-nbshm: $(TARGET)
 	$(call run_benchmark,nbshm)
@@ -70,12 +73,12 @@ else
 	@exit 0
 endif
 
-# Lock-free io_uring shared memory benchmark - Linux only
-run-lfushm: $(TARGET)
+# Lock-free non-blocking shared memory benchmark - Linux only
+run-lfnbshm: $(TARGET)
 ifeq ($(UNAME_S),Linux)
-	$(call run_benchmark,lfushm)
+	$(call run_benchmark,lfnbshm)
 else
-	@echo "Lock-free io_uring shared memory mode is only supported on Linux"
+	@echo "Lock-free non-blocking shared memory mode is only supported on Linux"
 	@exit 0
 endif
 
@@ -83,13 +86,15 @@ endif
 run-all:
 	@printf "## IPC Benchmark Suite\n\n"
 ifeq ($(UNAME_S),Linux)
-	$(MAKE) run-uds && \
+	$(MAKE) run-buds && \
+	$(MAKE) run-nbuds && \
 	$(MAKE) run-nbshm && \
 	$(MAKE) run-bshm && \
 	$(MAKE) run-lfbshm && \
-	$(MAKE) run-lfushm
+	$(MAKE) run-lfnbshm
 else
-	$(MAKE) run-uds && \
+	$(MAKE) run-buds && \
+	$(MAKE) run-nbuds && \
 	$(MAKE) run-nbshm && \
 	$(MAKE) run-bshm
 endif
@@ -100,13 +105,14 @@ help:
 	@echo "Available targets:"
 	@echo "  all       - Build the benchmark executable"
 	@echo "  clean     - Remove compiled files"
-	@echo "  run-uds   - Run Unix Domain Socket benchmark"
+	@echo "  run-buds   - Run Blocking Unix Domain Socket benchmark"
+	@echo "  run-nbuds  - Run Non-Blocking Unix Domain Socket benchmark (client side only)"
 	@echo "  run-nbshm - Run Notification-based Shared Memory benchmark"
 	@echo "  run-bshm  - Run Blocking Shared Memory benchmark"
 ifeq ($(UNAME_S),Linux)
 	@echo "  run-lfbshm - Run Lock-free Blocking Shared Memory benchmark (Linux only)"
-	@echo "  run-lfushm - Run Lock-free io_uring Shared Memory benchmark (Linux only)"
+	@echo "  run-lfnbshm - Run Lock-free Non-Blocking Shared Memory benchmark (Linux only)"
 endif
 	@echo "  run-all   - Run all benchmarks sequentially"
 
-.PHONY: all clean run-uds run-nbshm run-bshm run-lfbshm run-lfushm run-all help   
+.PHONY: all clean run-buds run-nbuds run-nbshm run-bshm run-lfbshm run-lfnbshm run-all help   

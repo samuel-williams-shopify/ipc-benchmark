@@ -58,7 +58,7 @@ BlockingRingBuffer* setup_blocking_shared_memory(size_t size, bool is_server) {
     rb->size = size;
     rb->message_available = false;
     rb->response_available = false;
-    rb->ready = true;
+    rb->ready = is_server; // Set ready based on whether it's a server or client
 
     close(fd);
     return rb;

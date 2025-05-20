@@ -19,10 +19,12 @@
 #include "interrupt.h"
 #include "benchmark.h"
 #include "uds.h"
-#include "shm.h"
-#include "lfbshm.h"
+#include "nbshm.h"
 #include "bshm.h"
+#ifdef __linux__
+#include "lfbshm.h"
 #include "lfushm.h"
+#endif
 
 /* Function prototypes */
 void print_usage(const char* prog_name);
@@ -33,7 +35,7 @@ void print_usage(const char* prog_name) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -s, --server           Run as server\n");
     fprintf(stderr, "  -c, --client           Run as client\n");
-    fprintf(stderr, "  -m, --mode MODE        IPC mode (uds, shm, bshm, lfbshm, lfushm)\n");
+    fprintf(stderr, "  -m, --mode MODE        IPC mode (uds, nbshm, bshm, lfbshm, lfushm)\n");
     fprintf(stderr, "  -d, --duration SECS    Benchmark duration in seconds\n");
     fprintf(stderr, "  -h, --help             Show this help message\n");
 }
@@ -120,22 +122,20 @@ int main(int argc, char* argv[]) {
             print_stats(&stats, "UDS Client");
             close(sock_fd);
         }
-    } else if (strcmp(mode, "shm") == 0) {
+    } else if (strcmp(mode, "nbshm") == 0) {
+        RingBuffer* rb = setup_shared_memory(BUFFER_SIZE, is_server);
+        if (rb == NULL) {
+            fprintf(stderr, "Failed to setup shared memory\n");
+            return 1;
+        }
         if (is_server) {
-            RingBuffer* rb = setup_shared_memory(BUFFER_SIZE, true);
-            if (!rb) {
-                return 1;
-            }
             run_shm_server(rb, duration_secs);
         } else {
-            RingBuffer* rb = setup_shared_memory(BUFFER_SIZE, false);
-            if (!rb) {
-                return 1;
-            }
             BenchmarkStats stats = {0};
             run_shm_client(rb, duration_secs, &stats);
-            print_stats(&stats, "SHM Client");
+            print_stats(&stats, "NBSHM Client");
         }
+        // Cleanup is handled by the server
     } else if (strcmp(mode, "bshm") == 0) {
         if (is_server) {
             BlockingRingBuffer* rb = setup_blocking_shared_memory(BUFFER_SIZE, true);

@@ -11,7 +11,7 @@ The suite includes four different IPC implementations:
    - Standard socket-based IPC mechanism
    - Good baseline for comparison
 
-2. **Shared Memory with Pthread (SHM)**
+2. **Notification-based Shared Memory (NBSHM)**
    - Uses pthread mutex and condition variables
    - Dedicated notification thread
    - Eventfd-based signaling
@@ -41,7 +41,7 @@ make
 Run individual benchmarks:
 ```bash
 make run-uds    # Unix Domain Sockets
-make run-shm    # Shared Memory with pthread
+make run-nbshm  # Notification-based Shared Memory
 make run-bshm   # Blocking Shared Memory
 make run-lfbshm # Lock-free Blocking Shared Memory (Linux only)
 ```
@@ -84,7 +84,7 @@ sequenceDiagram
     CS->>C: read()
 ```
 
-### Shared Memory with Notification Thread (SHM)
+### Notification-based Shared Memory (NBSHM)
 
 Uses shared memory with a shared mutex for signalling between the client and server. A dedicated notification thread is needed for coordinating with the event loop. Note that this implemenation is still not fully event driven due to the fact that the client locks the mutex in the first instance, but it's sufficiently event-driven for the sake of this comparison.
 
@@ -131,7 +131,7 @@ Uses shared memory and blocking operations, shows the maximum throughput of a PO
 - Direct blocking operations without notification thread.
 - Fixed-size ring buffer (4MB).
 - Message size limit of 2MB (half buffer size).
-- Simpler synchronization model than SHM.
+- Simpler synchronization model than NBSHM.
 - Messages flow through shared memory with direct blocking synchronization.
 
 ```mermaid

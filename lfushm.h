@@ -3,6 +3,8 @@
 #include "benchmark.h"
 #include <stddef.h>
 #include <stdbool.h>
+
+#ifdef __linux__
 #include <linux/futex.h>
 #include <liburing.h>
 
@@ -26,3 +28,5 @@ void run_lfushm_server(LockFreeURingRingBuffer* rb, int duration_secs);
 
 /* Run the Lock-free io_uring Shared Memory client benchmark */
 void run_lfushm_client(LockFreeURingRingBuffer* rb, int duration_secs, BenchmarkStats* stats); 
+
+#endif /* __linux__ */

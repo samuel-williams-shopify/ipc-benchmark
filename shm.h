@@ -16,11 +16,6 @@ struct RingBuffer {
     bool message_available;
     bool response_available;
     volatile bool ready;
-    uint64_t mutex_lock_time;
-    uint64_t cond_wait_time;
-    uint64_t notify_time;
-    uint64_t copy_time;
-    uint64_t total_ops;
     char buffer[0];
 };
 

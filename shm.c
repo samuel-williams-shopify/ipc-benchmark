@@ -120,22 +120,14 @@ static bool ring_buffer_read(RingBuffer* rb, void* data, size_t max_len, size_t*
 
 /* Write a message from client to server */
 static bool ring_buffer_write_client_to_server(RingBuffer* rb, const void* data, size_t len) {
-    uint64_t start_time = get_timestamp_us();
-    
     pthread_mutex_lock(&rb->mutex);
-    uint64_t mutex_end = get_timestamp_us();
-    rb->mutex_lock_time += (mutex_end - start_time);
     
     // Wait for space in the buffer
     while (rb->write_pos == rb->read_pos && rb->message_available) {
-        uint64_t wait_start = get_timestamp_us();
         pthread_cond_wait(&rb->server_cond, &rb->mutex);
-        uint64_t wait_end = get_timestamp_us();
-        rb->cond_wait_time += (wait_end - wait_start);
     }
     
     // Write the message
-    uint64_t copy_start = get_timestamp_us();
     size_t write_pos = rb->write_pos;
     
     // Write the length first
@@ -170,21 +162,14 @@ static bool ring_buffer_write_client_to_server(RingBuffer* rb, const void* data,
         }
     }
     
-    uint64_t copy_end = get_timestamp_us();
-    rb->copy_time += (copy_end - copy_start);
-    
     // Update the write position
     rb->write_pos = write_pos;
     
     // Signal that a message is available
     rb->message_available = true;
-    uint64_t notify_start = get_timestamp_us();
     pthread_cond_signal(&rb->server_cond);
-    uint64_t notify_end = get_timestamp_us();
-    rb->notify_time += (notify_end - notify_start);
     
     pthread_mutex_unlock(&rb->mutex);
-    rb->total_ops++;
     
     return true;
 }
@@ -393,13 +378,6 @@ void run_shm_server(RingBuffer* rb, int duration_secs) {
     
     printf("Server ready to process messages\n");
     
-    // Initialize timing metrics
-    rb->mutex_lock_time = 0;
-    rb->cond_wait_time = 0;
-    rb->notify_time = 0;
-    rb->copy_time = 0;
-    rb->total_ops = 0;
-    
     while (get_timestamp_us() < end_time) {
         FD_ZERO(&read_fds);
         FD_SET(interrupt_get_fd(intr), &read_fds);
@@ -415,7 +393,7 @@ void run_shm_server(RingBuffer* rb, int duration_secs) {
         }
         
         if (FD_ISSET(interrupt_get_fd(intr), &read_fds)) {
-            // Clear the interrupt
+            // Read the notification
             if (interrupt_clear(intr) == -1) {
                 break;
             }
@@ -444,25 +422,6 @@ void run_shm_server(RingBuffer* rb, int duration_secs) {
     if (get_timestamp_us() >= end_time - 100000) { // Within 100ms of end
         printf("Server shutting down...\n");
     }
-
-    // Signal thread to exit and cleanup
-    thread_data.should_exit = true;
-    pthread_mutex_lock(&rb->mutex);
-    pthread_cond_signal(&rb->server_cond);
-    pthread_mutex_unlock(&rb->mutex);
-    
-    pthread_join(notif_thread, NULL);
-    printf("Server notification thread joined\n");
-    
-    // Print timing metrics before cleanup
-    printf("\nDetailed Timing Metrics:\n");
-    printf("Total Operations: %lu\n", (unsigned long)rb->total_ops);
-    printf("Average Mutex Lock Time: %.2f µs\n", (double)rb->mutex_lock_time / rb->total_ops);
-    printf("Average Condition Wait Time: %.2f µs\n", (double)rb->cond_wait_time / rb->total_ops);
-    printf("Average Notification Time: %.2f µs\n", (double)rb->notify_time / rb->total_ops);
-    printf("Average Copy Time: %.2f µs\n", (double)rb->copy_time / rb->total_ops);
-    printf("Total Synchronization Overhead: %.2f µs\n", 
-           (double)(rb->mutex_lock_time + rb->cond_wait_time + rb->notify_time) / rb->total_ops);
     
     // Cleanup
     interrupt_destroy(intr);
@@ -607,13 +566,6 @@ void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
         goto cleanup;
     }
 
-    // Initialize timing metrics
-    rb->mutex_lock_time = 0;
-    rb->cond_wait_time = 0;
-    rb->notify_time = 0;
-    rb->copy_time = 0;
-    rb->total_ops = 0;
-
     while (get_timestamp_us() < end_time) {
         FD_ZERO(&read_fds);
         FD_SET(interrupt_get_fd(intr), &read_fds);
@@ -672,16 +624,6 @@ void run_shm_client(RingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
     if (get_timestamp_us() >= end_time - 100000) { // Within 100ms of end
         printf("\nBenchmark completed successfully.\n");
     }
-
-    // Print timing metrics at the end
-    printf("\nDetailed Timing Metrics:\n");
-    printf("Total Operations: %lu\n", (unsigned long)rb->total_ops);
-    printf("Average Mutex Lock Time: %.2f µs\n", (double)rb->mutex_lock_time / rb->total_ops);
-    printf("Average Condition Wait Time: %.2f µs\n", (double)rb->cond_wait_time / rb->total_ops);
-    printf("Average Notification Time: %.2f µs\n", (double)rb->notify_time / rb->total_ops);
-    printf("Average Copy Time: %.2f µs\n", (double)rb->copy_time / rb->total_ops);
-    printf("Total Synchronization Overhead: %.2f µs\n", 
-           (double)(rb->mutex_lock_time + rb->cond_wait_time + rb->notify_time) / rb->total_ops);
 
     double cpu_end;
 cleanup:    

@@ -20,7 +20,7 @@
 #include "benchmark.h"
 #include "uds.h"
 #include "shm.h"
-#include "lfshm.h"
+#include "lfbshm.h"
 #include "bshm.h"
 #include "lfushm.h"
 
@@ -33,7 +33,7 @@ void print_usage(const char* prog_name) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -s, --server           Run as server\n");
     fprintf(stderr, "  -c, --client           Run as client\n");
-    fprintf(stderr, "  -m, --mode MODE        IPC mode (uds, shm, bshm, lfshm, lfushm)\n");
+    fprintf(stderr, "  -m, --mode MODE        IPC mode (uds, shm, bshm, lfbshm, lfushm)\n");
     fprintf(stderr, "  -d, --duration SECS    Benchmark duration in seconds\n");
     fprintf(stderr, "  -h, --help             Show this help message\n");
 }
@@ -152,22 +152,22 @@ int main(int argc, char* argv[]) {
             run_bshm_client(rb, duration_secs, &stats);
             print_stats(&stats, "BSHM Client");
         }
-    } else if (strcmp(mode, "lfshm") == 0) {
+    } else if (strcmp(mode, "lfbshm") == 0) {
 #ifdef HAVE_FUTEX
         if (is_server) {
             LockFreeRingBuffer* rb = setup_lockfree_shared_memory(BUFFER_SIZE);
             if (!rb) {
                 return 1;
             }
-            run_lfshm_server(rb, duration_secs);
+            run_lfbshm_server(rb, duration_secs);
         } else {
             LockFreeRingBuffer* rb = setup_lockfree_shared_memory(BUFFER_SIZE);
             if (!rb) {
                 return 1;
             }
             BenchmarkStats stats = {0};
-            run_lfshm_client(rb, duration_secs, &stats);
-            print_stats(&stats, "LFSHM Client");
+            run_lfbshm_client(rb, duration_secs, &stats);
+            print_stats(&stats, "LFBSHM Client");
         }
 #else
         fprintf(stderr, "Lock-free shared memory mode is only available on Linux\n");

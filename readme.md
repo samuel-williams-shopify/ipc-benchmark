@@ -21,7 +21,7 @@ The suite includes four different IPC implementations:
    - Direct blocking operations without notification thread
    - Separate mutexes for read/write operations
 
-4. **Lock-free Shared Memory (LFSHM)**
+4. **Lock-free Blocking Shared Memory (LFBSHM)**
    - Linux-specific implementation using futex
    - Lock-free ring buffer design
    - Optimized for low latency
@@ -43,7 +43,7 @@ Run individual benchmarks:
 make run-uds    # Unix Domain Sockets
 make run-shm    # Shared Memory with pthread
 make run-bshm   # Blocking Shared Memory
-make run-lfshm  # Lock-free Shared Memory (Linux only)
+make run-lfbshm # Lock-free Blocking Shared Memory (Linux only)
 ```
 
 Run all benchmarks sequentially:
@@ -161,7 +161,7 @@ sequenceDiagram
     Note over C: Unlock read mutex
 ```
 
-### Lock-free Shared Memory (LFSHM)
+### Lock-free Blocking Shared Memory (LFBSHM)
 
 Uses lock-free shared memory with futexes for coordination. Shows the absolute best possible performance possible.
 

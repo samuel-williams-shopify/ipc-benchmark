@@ -1,209 +1,142 @@
 # IPC Benchmark
 
-This project benchmarks different IPC mechanisms:
-1. Unix Domain Socket with select()
-2. Shared Memory with pthread_mutex and dedicated thread
-3. Linux-optimized implementation with futex and lock-free ring buffer
+This project benchmarks different inter-process communication (IPC) mechanisms on Linux, comparing their performance characteristics for message passing between processes.
 
-## Build and Run
+## IPC Mechanisms
 
-To build the project, run:
-```
-make
-```
+The benchmark compares three different IPC mechanisms:
 
-To run the benchmarks, use:
-```
-make run-uds  # Unix Domain Socket
-make run-shm  # Shared Memory
-make run-lfshm  # Lock-free Shared Memory (Linux only)
-```
+1. **Unix Domain Sockets (UDS)**
+   - Uses stream-oriented Unix domain sockets
+   - Server uses blocking I/O for simplicity
+   - Client uses non-blocking I/O with select() for robust message handling
+   - Provides reliable message delivery with kernel buffering
+   - Good for general-purpose IPC with moderate performance requirements
+
+2. **Shared Memory with Mutex**
+   - Uses POSIX shared memory with pthread mutexes
+   - Implements a ring buffer for message passing
+   - Provides high performance with kernel synchronization
+   - Good for high-throughput scenarios where processes are on the same machine
+   - Requires careful synchronization to prevent data races
+
+3. **Lock-free Shared Memory**
+   - Uses POSIX shared memory with atomic operations
+   - Implements a lock-free ring buffer
+   - Provides highest performance with minimal kernel involvement
+   - Best for scenarios requiring maximum throughput
+   - Requires careful implementation to ensure correctness
 
 ## Benchmark Results
 
-### Unix Domain Socket (UDS)
-- Operations per second: 63,437.10
-- Throughput: 187.91 MiB/s
-- CPU usage: 67.44%
-- Average latency: 9.01 µs
-- P50 latency: 9.00 µs
+### Unix Domain Sockets (UDS)
+- Operations per second: 64,716.50
+- Throughput: 191.71 MiB/s
+- CPU usage: 70.01%
+- Average latency: 8.78 µs
+- P50 latency: 8.00 µs
 - P95 latency: 11.00 µs
 - P99 latency: 16.00 µs
 
-### Shared Memory (SHM)
-- Operations per second: 34,355.40
-- Throughput: 101.76 MiB/s
-- CPU usage: 54.68%
-- Average latency: 16.17 µs
-- P50 latency: 16.00 µs
+### Shared Memory with Mutex (SHM)
+- Operations per second: 31,205.90
+- Throughput: 92.43 MiB/s
+- CPU usage: 51.20%
+- Average latency: 16.89 µs
+- P50 latency: 18.00 µs
 - P95 latency: 22.00 µs
-- P99 latency: 27.00 µs
+- P99 latency: 29.00 µs
 
-### Comparison
-- UDS outperforms SHM in throughput and latency due to kernel-level optimizations and efficient buffering.
-- SHM has lower CPU usage but higher latency due to synchronization overhead (mutex locks, condition variables, and notification handling).
-- The lock-free implementation (Linux only) may offer better performance than SHM by reducing synchronization overhead.
+### Detailed SHM Metrics
+- Average Mutex Lock Time: 0.02 µs
+- Average Condition Wait Time: 0.00 µs
+- Average Notification Time: 1.13 µs
+- Average Copy Time: 0.11 µs
+- Total Synchronization Overhead: 1.15 µs
 
-## Overview
+### Analysis
+- UDS shows better throughput and lower latency compared to SHM
+- SHM has lower CPU usage but higher latency due to synchronization overhead
+- The synchronization overhead in SHM is primarily from notifications (1.13 µs)
+- UDS provides better performance for general-purpose IPC on this system
 
-This benchmark compares three different IPC approaches:
+## Advanced IPC: io_uring with Futex
 
-1. **Unix Domain Socket**
-   - Non-blocking I/O with select()
-   - Kernel-managed buffering and synchronization
-   - Efficient local communication
+While not implemented in this benchmark, it's worth noting that modern Linux systems offer another powerful IPC mechanism using io_uring and futex:
 
-2. **Shared Memory with pthread_mutex**
-   - Shared memory region with a ring buffer
-   - pthread_mutex and condition variables for synchronization 
-   - Dedicated thread waiting on mutex, signaling via pipe/eventfd
+- **io_uring with Futex**
+  - io_uring can wait on a futex, enabling efficient shared memory IPC
+  - Allows processes to sleep on a futex in the kernel, waking up when the futex value changes
+  - Can be used to implement a shared memory message queue with kernel-assisted synchronization
+  - Provides high performance with minimal context switches
+  - Platform-specific to Linux and requires kernel support
+  - Example implementation would use:
+    - Shared memory for the message buffer
+    - Futex for synchronization
+    - io_uring to wait on the futex
+    - Zero-copy message passing
 
-3. **Linux-optimized Lock-free Shared Memory with futex**
-   - Lock-free ring buffer implementation
-   - Direct futex wait/wake for efficient thread synchronization
-   - Atomic operations for coordination
+However, it should be noted that this design is non-trivial.
 
-## Building
+## Building and Running
 
 ```bash
-# Build with make
 make
-
-# Clean build files
-make clean
+make run-all  # Run all benchmarks
+make run-uds  # Run Unix Domain Socket benchmark
+make run-shm  # Run Shared Memory benchmark
+make run-lfshm # Run Lock-free Shared Memory benchmark
 ```
 
-## Running Benchmarks
+## Requirements
 
-### Unix Domain Socket
-
-```bash
-# In terminal 1
-./ipc_benchmark --server --mode uds
-
-# In terminal 2
-./ipc_benchmark --client --mode uds
-```
-
-Or use the Makefile target:
-```bash
-make run-uds
-```
-
-### Shared Memory with pthread_mutex
-
-```bash
-# In terminal 1
-./ipc_benchmark --server --mode shm
-
-# In terminal 2
-./ipc_benchmark --client --mode shm
-```
-
-Or use the Makefile target:
-```bash
-make run-shm
-```
-
-### Lock-free Shared Memory
-
-```bash
-# In terminal 1
-./ipc_benchmark --server --mode lfshm
-
-# In terminal 2
-./ipc_benchmark --client --mode lfshm
-```
-
-Or use the Makefile target:
-```bash
-make run-lfshm
-```
-
-### Run All Benchmarks
-
-```bash
-make run-all
-```
-
-## Benchmark Details
-
-Each benchmark measures:
-
-- **Operations per second**: Number of request/response cycles completed
-- **Throughput**: Data transferred in MiB/s
-- **CPU usage**: Percentage of CPU time used
-- **Latency**: Average, P50, P95, and P99 latency in microseconds
-
-Message sizes vary from 2-4KiB typical, up to a maximum of 128KiB.
-
-## Implementation Design
-
-### 1. Unix Domain Socket
-
-```
-Client Process                     Server Process
-+----------------+                +----------------+
-| select() Event |                | select() Event |
-| Loop           |                | Loop           |
-|                |                |                |
-| - Non-blocking |<--UDS Pipe---->| - Non-blocking |
-|   send/recv    |                |   send/recv    |
-+----------------+                +----------------+
-```
-
-### 2. Shared Memory with pthread_mutex and Thread
-
-```
-Client Process                           Server Process
-+----------------+                      +----------------+
-| select() Event |                      | select() Event |
-| Loop           |                      | Loop           |
-|                |                      |                |
-| - READ from    |<---pipe/eventfd----->| - READ from    |
-|   notif pipe   |       events         |   notif pipe   |
-+----------------+                      +----------------+
-        ^                                      ^
-        |                                      |
-+----------------+                      +----------------+
-| Thread waiting |                      | Thread waiting |
-| on cond var    |                      | on cond var    |
-+----------------+                      +----------------+
-        ^                                      ^
-        |                                      |
-+----------------+                      +----------------+
-| memfd shared   |<----Ring Buffer----->| memfd shared   |
-| memory region  |   with pthread_mutex | memory region  |
-+----------------+                      +----------------+
-```
-
-### 3. Linux-optimized Shared Memory with futex
-
-```
-Client Process                           Server Process
-+----------------+                      +----------------+
-| Direct futex   |<----Atomic counters->| Direct futex   |
-| integration    |                      | integration    |
-+----------------+                      +----------------+
-        ^                                      ^
-        |                                      |
-+----------------+                      +----------------+
-| memfd shared   |<----Lock-free------->| memfd shared   |
-| memory region  |     Ring Buffer      | memory region  |
-+----------------+                      +----------------+
-```
-
-## System Requirements
-
-- Unix-based OS (Linux, macOS, etc.)
+- Linux operating system
+- POSIX shared memory support
 - pthread library
-- rt library (Linux only)
+- C compiler (gcc or clang)
 
-## Purpose
+## Results
 
-This benchmark demonstrates the performance trade-offs when using different IPC mechanisms, comparing traditional Unix Domain Sockets with shared memory approaches.
+- CPU: Apple M4 Pro
+- Memory: 48GB (51539607552 bytes)
+- OS: macOS 24.4.0
 
-The shared memory implementation specifically shows how a traditional mutex-based approach with a dedicated thread affects performance compared to direct socket I/O, helping developers make informed decisions about their IPC strategy.
+The benchmark measures:
+- Message throughput (messages/second)
+- Latency (microseconds)
+- CPU usage
+- Memory usage
+
+### Unix Domain Sockets (UDS)
+- Operations per second: 64,716.50
+- Throughput: 191.71 MiB/s
+- CPU usage: 70.01%
+- Average latency: 8.78 µs
+- P50 latency: 8.00 µs
+- P95 latency: 11.00 µs
+- P99 latency: 16.00 µs
+
+### Shared Memory with Mutex (SHM)
+- Operations per second: 31,205.90
+- Throughput: 92.43 MiB/s
+- CPU usage: 51.20%
+- Average latency: 16.89 µs
+- P50 latency: 18.00 µs
+- P95 latency: 22.00 µs
+- P99 latency: 29.00 µs
+
+### Detailed SHM Metrics
+- Average Mutex Lock Time: 0.02 µs
+- Average Condition Wait Time: 0.00 µs
+- Average Notification Time: 1.13 µs
+- Average Copy Time: 0.11 µs
+- Total Synchronization Overhead: 1.15 µs
+
+### Analysis
+- UDS shows better throughput and lower latency compared to SHM
+- SHM has lower CPU usage but higher latency due to synchronization overhead
+- The synchronization overhead in SHM is primarily from notifications (1.13 µs)
+- UDS provides better performance for general-purpose IPC on this system
 
 ## License
 

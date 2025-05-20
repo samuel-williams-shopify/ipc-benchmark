@@ -267,6 +267,7 @@ RingBuffer* setup_shared_memory(size_t size, bool is_server) {
 
     size_t page_size = getpagesize();
     total_size = (total_size + page_size - 1) & ~(page_size - 1);
+
     if (is_server) {
         // Server: create and truncate
         shm_unlink(SHM_NAME); // Ensure old segment is gone
@@ -453,13 +454,7 @@ void run_shm_server(RingBuffer* rb, int duration_secs) {
     pthread_join(notif_thread, NULL);
     printf("Server notification thread joined\n");
     
-    // Cleanup
-    interrupt_destroy(intr);
-    free(buffer);
-    munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
-    shm_unlink(SHM_NAME);
-
-    // Print timing metrics at the end
+    // Print timing metrics before cleanup
     printf("\nDetailed Timing Metrics:\n");
     printf("Total Operations: %llu\n", rb->total_ops);
     printf("Average Mutex Lock Time: %.2f µs\n", (double)rb->mutex_lock_time / rb->total_ops);
@@ -468,6 +463,12 @@ void run_shm_server(RingBuffer* rb, int duration_secs) {
     printf("Average Copy Time: %.2f µs\n", (double)rb->copy_time / rb->total_ops);
     printf("Total Synchronization Overhead: %.2f µs\n", 
            (double)(rb->mutex_lock_time + rb->cond_wait_time + rb->notify_time) / rb->total_ops);
+    
+    // Cleanup
+    interrupt_destroy(intr);
+    free(buffer);
+    munmap(rb, sizeof(RingBuffer) + BUFFER_SIZE);
+    shm_unlink(SHM_NAME);
 }
 
 /* Run the Shared Memory client benchmark */

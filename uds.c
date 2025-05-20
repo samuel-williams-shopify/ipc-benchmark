@@ -101,69 +101,33 @@ void run_uds_server(int socket_fd, int duration_secs) {
     // Start the benchmark
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
-    
-    // Set socket to non-blocking mode
-    int flags = fcntl(socket_fd, F_GETFL, 0);
-    fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK);
-
-    fd_set read_fds, write_fds;
-    bool waiting_to_write = false;
-    size_t msg_size = 0;
 
     while (get_timestamp_us() < end_time) {
-        struct timeval timeout = {.tv_sec = 0, .tv_usec = 10000}; // 10ms timeout
-        
-        FD_ZERO(&read_fds);
-        FD_ZERO(&write_fds);
-        
-        if (!waiting_to_write) {
-            FD_SET(socket_fd, &read_fds);
-        }
-        if (waiting_to_write) {
-            FD_SET(socket_fd, &write_fds);
-        }
-        
-        int ret = select(socket_fd + 1, &read_fds, &write_fds, NULL, &timeout);
-        if (ret < 0) {
-            if (errno == EINTR) continue;
-            perror("select");
+        // Read message from client
+        ssize_t bytes_read = read(socket_fd, buffer, MAX_MSG_SIZE);
+        if (bytes_read == 0) {
+            // Clean shutdown - remote end closed connection
+            printf("Connection closed by remote end\n");
+            break;
+        } else if (bytes_read < 0) {
+            perror("read");
             break;
         }
         
-        if (FD_ISSET(socket_fd, &read_fds)) {
-            ssize_t bytes_read = read(socket_fd, buffer, MAX_MSG_SIZE);
-            if (bytes_read == 0) {
-                // Clean shutdown - remote end closed connection
-                printf("Connection closed by remote end\n");
-                break;
-            } else if (bytes_read < 0) {
-                if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    perror("read");
-                    break;
-                }
-                continue;
-            }
-            
-            Message* msg = (Message*)buffer;
-            if (!validate_message(msg, bytes_read)) {
-                fprintf(stderr, "Server: Message validation failed\n");
-                continue;
-            }
-            
-            msg_size = msg->size;
-            waiting_to_write = true;
+        Message* msg = (Message*)buffer;
+        if (!validate_message(msg, bytes_read)) {
+            fprintf(stderr, "Server: Message validation failed\n");
+            continue;
         }
         
-        if (FD_ISSET(socket_fd, &write_fds)) {
-            ssize_t bytes_written = write(socket_fd, buffer, msg_size);
-            if (bytes_written <= 0) {
-                if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    perror("write");
-                    break;
-                }
-                continue;
-            }
-            waiting_to_write = false;
+        // Echo the message back to client
+        ssize_t bytes_written = write(socket_fd, buffer, msg->size);
+        if (bytes_written <= 0) {
+            perror("write");
+            break;
+        }
+        if (bytes_written != msg->size) {
+            fprintf(stderr, "Server: Write incomplete: wrote %zd of %zu bytes\n", bytes_written, msg->size);
         }
     }
     
@@ -205,6 +169,8 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
     
     // Send the first message (warmup)
     random_message(msg, 2048, 4096);
+    size_t total_bytes_written = 0;
+    size_t total_bytes_read = 0;
     bool waiting_for_read = false;
     bool waiting_to_write = true;
     
@@ -231,22 +197,31 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
             break;
         }
         
-        if (FD_ISSET(socket_fd, &write_fds)) {
-            ssize_t bytes_written = write(socket_fd, buffer, msg->size);
-            if (bytes_written <= 0) {
+        if (FD_ISSET(socket_fd, &write_fds) && waiting_to_write) {
+            ssize_t bytes_written = write(socket_fd, 
+                                        (char*)buffer + total_bytes_written,
+                                        msg->size - total_bytes_written);
+            if (bytes_written < 0) {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
                     perror("write");
                     break;
                 }
                 continue;
             }
-            waiting_to_write = false;
-            waiting_for_read = true;
+            
+            total_bytes_written += bytes_written;
+            if (total_bytes_written == msg->size) {
+                waiting_to_write = false;
+                waiting_for_read = true;
+                total_bytes_written = 0;
+            }
         }
         
-        if (FD_ISSET(socket_fd, &read_fds)) {
-            ssize_t bytes_read = read(socket_fd, buffer, MAX_MSG_SIZE);
-            if (bytes_read <= 0) {
+        if (FD_ISSET(socket_fd, &read_fds) && waiting_for_read) {
+            ssize_t bytes_read = read(socket_fd, 
+                                    (char*)buffer + total_bytes_read,
+                                    MAX_MSG_SIZE - total_bytes_read);
+            if (bytes_read < 0) {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
                     perror("read");
                     break;
@@ -254,10 +229,30 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
                 continue;
             }
             
-            // Send the next warmup message
-            random_message(msg, 2048, 4096);
-            waiting_to_write = true;
-            waiting_for_read = false;
+            if (bytes_read == 0) {
+                // Clean shutdown - remote end closed connection
+                printf("Connection closed by remote end\n");
+                break;
+            }
+            
+            total_bytes_read += bytes_read;
+            
+            // After reading the header, validate the message
+            if (total_bytes_read >= sizeof(Message)) {
+                Message* response = (Message*)buffer;
+                if (total_bytes_read >= response->size) {
+                    if (!validate_message(response, total_bytes_read)) {
+                        fprintf(stderr, "Client: Message validation failed\n");
+                        break;
+                    }
+                    
+                    // Send the next warmup message
+                    random_message(msg, 2048, 4096);
+                    waiting_to_write = true;
+                    waiting_for_read = false;
+                    total_bytes_read = 0;
+                }
+            }
         }
     }
     
@@ -276,6 +271,8 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
     msg->timestamp = get_timestamp_us();
     waiting_to_write = true;
     waiting_for_read = false;
+    total_bytes_written = 0;
+    total_bytes_read = 0;
     
     while (get_timestamp_us() < end_time) {
         struct timeval timeout = {.tv_sec = 0, .tv_usec = 10000}; // 10ms timeout
@@ -297,26 +294,31 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
             break;
         }
         
-        if (FD_ISSET(socket_fd, &write_fds)) {
-            ssize_t bytes_written = write(socket_fd, buffer, msg->size);
-            if (bytes_written <= 0) {
+        if (FD_ISSET(socket_fd, &write_fds) && waiting_to_write) {
+            ssize_t bytes_written = write(socket_fd, 
+                                        (char*)buffer + total_bytes_written,
+                                        msg->size - total_bytes_written);
+            if (bytes_written < 0) {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
                     perror("write");
                     break;
                 }
                 continue;
             }
-            waiting_to_write = false;
-            waiting_for_read = true;
+            
+            total_bytes_written += bytes_written;
+            if (total_bytes_written == msg->size) {
+                waiting_to_write = false;
+                waiting_for_read = true;
+                total_bytes_written = 0;
+            }
         }
         
-        if (FD_ISSET(socket_fd, &read_fds)) {
-            ssize_t bytes_read = read(socket_fd, buffer, MAX_MSG_SIZE);
-            if (bytes_read == 0) {
-                // Clean shutdown - remote end closed connection
-                printf("\nBenchmark completed successfully\n");
-                break;
-            } else if (bytes_read < 0) {
+        if (FD_ISSET(socket_fd, &read_fds) && waiting_for_read) {
+            ssize_t bytes_read = read(socket_fd, 
+                                    (char*)buffer + total_bytes_read,
+                                    MAX_MSG_SIZE - total_bytes_read);
+            if (bytes_read < 0) {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
                     perror("read");
                     break;
@@ -324,29 +326,43 @@ void run_uds_client(int socket_fd, int duration_secs, BenchmarkStats* stats) {
                 continue;
             }
             
-            Message* response = (Message*)buffer;
-            if (!validate_message(response, bytes_read)) {
-                fprintf(stderr, "Client: Message validation failed\n");
-                continue;
+            if (bytes_read == 0) {
+                // Clean shutdown - remote end closed connection
+                printf("\nBenchmark completed successfully\n");
+                break;
             }
             
-            // Calculate latency
-            uint64_t now = get_timestamp_us();
-            uint64_t latency = now - response->timestamp;
+            total_bytes_read += bytes_read;
             
-            if (latency_count < MAX_LATENCIES) {
-                latencies[latency_count++] = latency;
+            // After reading the header, validate the message
+            if (total_bytes_read >= sizeof(Message)) {
+                Message* response = (Message*)buffer;
+                if (total_bytes_read >= response->size) {
+                    if (!validate_message(response, total_bytes_read)) {
+                        fprintf(stderr, "Client: Message validation failed\n");
+                        break;
+                    }
+                    
+                    // Calculate latency
+                    uint64_t now = get_timestamp_us();
+                    uint64_t latency = now - response->timestamp;
+                    
+                    if (latency_count < MAX_LATENCIES) {
+                        latencies[latency_count++] = latency;
+                    }
+                    
+                    // Update statistics
+                    ops++;
+                    bytes += total_bytes_read;
+                    
+                    // Send the next message
+                    random_message(msg, 2048, 4096);
+                    msg->timestamp = get_timestamp_us();
+                    waiting_to_write = true;
+                    waiting_for_read = false;
+                    total_bytes_read = 0;
+                }
             }
-            
-            // Update statistics
-            ops++;
-            bytes += bytes_read;
-            
-            // Send the next message
-            random_message(msg, 2048, 4096);
-            msg->timestamp = get_timestamp_us();
-            waiting_to_write = true;
-            waiting_for_read = false;
         }
     }
     

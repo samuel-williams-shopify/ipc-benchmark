@@ -36,38 +36,48 @@ clean:
 
 # Helper function to run a benchmark safely
 define run_benchmark
-	@trap 'kill $$SERVER_PID 2>/dev/null || true' EXIT; \
+	@echo "\n=== Running $(1) Benchmark ===\n"; \
+	trap 'kill $$SERVER_PID 2>/dev/null || true' EXIT; \
 	./$(TARGET) --server --mode $(1) & \
 	SERVER_PID=$$!; \
 	echo "Server PID: $$SERVER_PID"; \
 	sleep 2; \
 	./$(TARGET) --client --mode $(1); \
+	RESULT=$$?; \
 	kill $$SERVER_PID 2>/dev/null || true; \
-	wait $$SERVER_PID 2>/dev/null || true
+	wait $$SERVER_PID 2>/dev/null || true; \
+	echo "\n=== $(1) Benchmark Complete ===\n"; \
+	exit $$RESULT
 endef
 
 # Run the benchmarks
-run-uds:
+run-uds: $(TARGET)
 	$(call run_benchmark,uds)
 
-run-shm:
+run-shm: $(TARGET)
 	$(call run_benchmark,shm)
 
 # Lock-free shared memory benchmark - Linux only
-run-lfshm:
+run-lfshm: $(TARGET)
 ifeq ($(UNAME_S),Linux)
 	$(call run_benchmark,lfshm)
 else
 	@echo "Lock-free shared memory mode is only supported on Linux"
+	@exit 0
 endif
 
 # Run all benchmarks
 run-all:
+	@echo "Starting IPC Benchmark Suite\n"
 ifeq ($(UNAME_S),Linux)
-	$(MAKE) run-uds run-shm run-lfshm
+	$(MAKE) run-uds && \
+	$(MAKE) run-shm && \
+	$(MAKE) run-lfshm
 else
-	$(MAKE) run-uds run-shm
+	$(MAKE) run-uds && \
+	$(MAKE) run-shm
 endif
+	@echo "\nIPC Benchmark Suite Complete\n"
 
 # Show help
 help:

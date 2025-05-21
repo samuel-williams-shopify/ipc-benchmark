@@ -157,65 +157,13 @@ void run_uds_blocking_client(UDSBlockingState* state, int duration_secs, Benchma
     size_t latency_count = 0;
     double cpu_start = get_cpu_usage();
     Message* msg = (Message*)buffer;
-    uint64_t start_warmup = get_timestamp_us();
-    uint64_t end_warmup = start_warmup + (WARMUP_DURATION * 1000000ULL);
 
-    // Warmup phase
-    while (get_timestamp_us() < end_warmup) {
-        // Send message
-        random_message(msg, 2048, 4096);
-        msg->timestamp = get_timestamp_us();
-        ssize_t sent = send(state->fd, buffer, msg->size, 0);
-        if (sent != msg->size) {
-            if (sent < 0 && (errno == EPIPE || errno == ECONNRESET)) {
-                fprintf(stderr, "Connection closed by server (warmup)\n");
-                break;
-            }
-            perror("send");
-            break;
-        }
-
-        // Read header
-        ssize_t header_bytes = recv(state->fd, buffer, sizeof(Message), 0);
-        if (header_bytes <= 0) {
-            if (header_bytes == 0 || (header_bytes < 0 && (errno == EPIPE || errno == ECONNRESET))) {
-                fprintf(stderr, "Connection closed by server (warmup)\n");
-                break;
-            }
-            fprintf(stderr, "Failed to read message header\n");
-            break;
-        }
-
-        Message* response = (Message*)buffer;
-        size_t msg_size = response->size;
-        if (msg_size < sizeof(Message) + sizeof(uint32_t) || msg_size > MAX_MSG_SIZE) {
-            fprintf(stderr, "Client: Invalid message size %zu\n", msg_size);
-            break;
-        }
-
-        // Read body
-        ssize_t body_bytes = recv(state->fd, (char*)buffer + sizeof(Message), msg_size - sizeof(Message), 0);
-        if (body_bytes < 0) {
-            if (errno == EPIPE || errno == ECONNRESET) {
-                fprintf(stderr, "Connection closed by server (warmup)\n");
-                break;
-            }
-            fprintf(stderr, "Failed to read message body\n");
-            break;
-        }
-
-        if (!validate_message(response, msg_size)) {
-            fprintf(stderr, "Client: Message validation failed\n");
-        }
-    }
-
-    printf("Warmup completed, starting benchmark...\n");
+    // Benchmark phase
     stats->ops = 0;
     stats->bytes = 0;
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
 
-    // Benchmark phase
     while (get_timestamp_us() < end_time) {
         // Send message
         random_message(msg, 2048, 4096);

@@ -241,50 +241,20 @@ void run_lfbshm_client(LockFreeBlockingRingBuffer* rb, int duration_secs, Benchm
     double cpu_start = get_cpu_usage();
 
     Message* msg = (Message*)buffer;
-    uint64_t start_warmup = get_timestamp_us();
-    uint64_t end_warmup = start_warmup + (WARMUP_DURATION * 1000000ULL);
 
-    // Warmup phase
-    while (get_timestamp_us() < end_warmup) {
-        // Send message
-        random_message(msg, 2048, 4096);
-        msg->timestamp = get_timestamp_us();
-        if (!ring_buffer_write(rb, buffer, msg->size)) {
-            fprintf(stderr, "Failed to write message to ring buffer\n");
-            continue;
-        }
-        
-        // Wake up server
-        futex_wake((volatile uint32_t*)&rb->server_futex, 1);
-
-        // Wait for response
-        size_t msg_size;
-        bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
-        
-        if (read_success) {
-            if (!validate_message(msg, msg_size)) {
-                fprintf(stderr, "Client: Message validation failed\n");
-            }
-        } else {
-            // Wait for server to write
-            futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_acquire(&rb->client_futex));
-        }
-    }
-
-    printf("Warmup completed, starting benchmark...\n");
+    // Benchmark phase
     stats->ops = 0;
     stats->bytes = 0;
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
 
-    // Benchmark phase
     while (get_timestamp_us() < end_time) {
         // Send message
         random_message(msg, 2048, 4096);
         msg->timestamp = get_timestamp_us();
         if (!ring_buffer_write(rb, buffer, msg->size)) {
             fprintf(stderr, "Failed to write message to ring buffer\n");
-            continue;
+            break;
         }
         
         // Wake up server

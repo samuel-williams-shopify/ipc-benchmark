@@ -262,91 +262,26 @@ void run_lfnbshm_client(LockFreeNonBlockingRingBuffer* rb, int duration_secs, Be
     }
 
     Message* msg = (Message*)buffer;
-    uint64_t start_warmup = get_timestamp_us();
-    uint64_t end_warmup = start_warmup + (WARMUP_DURATION * 1000000ULL);
 
-    // Warmup phase
-    while (get_timestamp_us() < end_warmup) {
-        // Send message
-        random_message(msg, 2048, 4096);
-        msg->timestamp = get_timestamp_us();
-        if (!ring_buffer_write(rb, buffer, msg->size)) {
-            fprintf(stderr, "Failed to write message to ring buffer\n");
-            continue;
-        }
-
-        // Wake server using io_uring futex
-        struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-        io_uring_prep_futex_wake(sqe, &rb->message_available, 1, FUTEX_PRIVATE_FLAG);
-        io_uring_submit(&ring);
-
-        // Wait for response using io_uring futex
-        sqe = io_uring_get_sqe(&ring);
-        io_uring_prep_futex_wait(sqe, &rb->response_available, 0, NULL, FUTEX_PRIVATE_FLAG);
-        
-        struct io_uring_cqe* cqe;
-        if (io_uring_submit_and_wait(&ring, 1) < 0) {
-            perror("io_uring_submit_and_wait");
-            continue;
-        }
-        
-        if (io_uring_wait_cqe(&ring, &cqe) < 0) {
-            perror("io_uring_wait_cqe");
-            continue;
-        }
-        
-        io_uring_cqe_seen(&ring, cqe);
-        
-        // Read response from ring buffer
-        size_t msg_size;
-        bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
-        
-        if (read_success) {
-            if (!validate_message(msg, msg_size)) {
-                fprintf(stderr, "Client: Message validation failed\n");
-            }
-        }
-    }
-
-    printf("Warmup completed, starting benchmark...\n");
+    // Benchmark phase
     stats->ops = 0;
     stats->bytes = 0;
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
 
-    // Benchmark phase
     while (get_timestamp_us() < end_time) {
         // Send message
         random_message(msg, 2048, 4096);
         msg->timestamp = get_timestamp_us();
         if (!ring_buffer_write(rb, buffer, msg->size)) {
             fprintf(stderr, "Failed to write message to ring buffer\n");
-            continue;
+            break;
         }
+        
+        // Wake up server
+        futex_wake((volatile uint32_t*)&rb->server_futex, 1);
 
-        // Wake server using io_uring futex
-        struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-        io_uring_prep_futex_wake(sqe, &rb->message_available, 1, FUTEX_PRIVATE_FLAG);
-        io_uring_submit(&ring);
-
-        // Wait for response using io_uring futex
-        sqe = io_uring_get_sqe(&ring);
-        io_uring_prep_futex_wait(sqe, &rb->response_available, 0, NULL, FUTEX_PRIVATE_FLAG);
-        
-        struct io_uring_cqe* cqe;
-        if (io_uring_submit_and_wait(&ring, 1) < 0) {
-            perror("io_uring_submit_and_wait");
-            continue;
-        }
-        
-        if (io_uring_wait_cqe(&ring, &cqe) < 0) {
-            perror("io_uring_wait_cqe");
-            continue;
-        }
-        
-        io_uring_cqe_seen(&ring, cqe);
-        
-        // Read response from ring buffer
+        // Wait for response
         size_t msg_size;
         bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
         
@@ -366,9 +301,12 @@ void run_lfnbshm_client(LockFreeNonBlockingRingBuffer* rb, int duration_secs, Be
             // Update statistics
             stats->ops++;
             stats->bytes += msg_size;
+        } else {
+            // Wait for server to write
+            futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_acquire(&rb->client_futex));
         }
     }
-    
+
     double cpu_end = get_cpu_usage();
     stats->cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);
     calculate_stats(latencies, latency_count, stats);

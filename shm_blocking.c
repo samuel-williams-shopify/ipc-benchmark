@@ -244,71 +244,44 @@ void run_shm_blocking_client(BlockingRingBuffer* rb, int duration_secs, Benchmar
     }
     size_t latency_count = 0;
     double cpu_start = get_cpu_usage();
-
     Message* msg = (Message*)buffer;
-    uint64_t start_warmup = get_timestamp_us();
-    uint64_t end_warmup = start_warmup + (WARMUP_DURATION * 1000000ULL);
 
-    // Warmup phase
-    while (get_timestamp_us() < end_warmup) {
-        // Send message
-        random_message(msg, 2048, 4096);
-        msg->timestamp = get_timestamp_us();
-        if (!ring_buffer_write(rb, buffer, msg->size)) {
-            fprintf(stderr, "Failed to write message to ring buffer\n");
-            continue;
-        }
-
-        // Wait for response
-        size_t msg_size;
-        if (!ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size)) {
-            fprintf(stderr, "Failed to read response from ring buffer\n");
-            continue;
-        }
-
-        if (!validate_message(msg, msg_size)) {
-            fprintf(stderr, "Client: Message validation failed\n");
-        }
-    }
-
-    printf("Warmup completed, starting benchmark...\n");
+    // Benchmark phase
     stats->ops = 0;
     stats->bytes = 0;
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
 
-    // Benchmark phase
     while (get_timestamp_us() < end_time) {
         // Send message
         random_message(msg, 2048, 4096);
         msg->timestamp = get_timestamp_us();
         if (!ring_buffer_write(rb, buffer, msg->size)) {
             fprintf(stderr, "Failed to write message to ring buffer\n");
-            continue;
+            break;
         }
 
         // Wait for response
         size_t msg_size;
-        if (!ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size)) {
-            fprintf(stderr, "Failed to read response from ring buffer\n");
-            continue;
-        }
-
-        if (!validate_message(msg, msg_size)) {
-            fprintf(stderr, "Client: Message validation failed\n");
-        }
-
-        // Calculate latency
-        uint64_t now = get_timestamp_us();
-        uint64_t latency = now - msg->timestamp;
+        bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
         
-        if (latency_count < MAX_LATENCIES) {
-            latencies[latency_count++] = latency;
+        if (read_success) {
+            if (!validate_message(msg, msg_size)) {
+                fprintf(stderr, "Client: Message validation failed\n");
+            }
+
+            // Calculate latency
+            uint64_t now = get_timestamp_us();
+            uint64_t latency = now - msg->timestamp;
+            
+            if (latency_count < MAX_LATENCIES) {
+                latencies[latency_count++] = latency;
+            }
+            
+            // Update statistics
+            stats->ops++;
+            stats->bytes += msg_size;
         }
-        
-        // Update statistics
-        stats->ops++;
-        stats->bytes += msg_size;
     }
 
     double cpu_end = get_cpu_usage();

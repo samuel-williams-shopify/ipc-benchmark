@@ -294,30 +294,7 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
         return;
     }
 
-    // Warmup phase
-    uint64_t start_warmup = get_timestamp_us();
-    uint64_t end_warmup = start_warmup + (WARMUP_DURATION * 1000000ULL);
-    
-    while (get_timestamp_us() < end_warmup) {
-        // Send message
-        random_message(msg, 2048, 4096);
-        msg->timestamp = get_timestamp_us();
-        interrupt_signal(write_intr);
-
-        // Wait for response
-        if (interrupt_wait(read_intr) == -1) {
-            perror("interrupt_wait");
-            break;
-        }
-        
-        if (read_success) {
-            if (!validate_message(msg, msg_size)) {
-                fprintf(stderr, "Client: Message validation failed\n");
-            }
-        }
-    }
-
-    printf("Warmup completed, starting benchmark...\n");
+    // Benchmark phase
     stats->ops = 0;
     stats->bytes = 0;
     uint64_t start_time = get_timestamp_us();
@@ -330,16 +307,13 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
         interrupt_signal(write_intr);
 
         // Wait for response
-        if (interrupt_wait(read_intr) == -1) {
-            perror("interrupt_wait");
-            break;
-        }
+        interrupt_wait(read_intr);
         
         if (read_success) {
             if (!validate_message(msg, msg_size)) {
                 fprintf(stderr, "Client: Message validation failed\n");
             }
-            
+
             // Calculate latency
             uint64_t now = get_timestamp_us();
             uint64_t latency = now - msg->timestamp;
@@ -354,13 +328,14 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
         }
     }
 
+    // Cleanup
+    thread_data.should_exit = true;
+    interrupt_signal(write_intr);
+    pthread_join(notif_thread, NULL);
+    
     double cpu_end = get_cpu_usage();
     stats->cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);
     calculate_stats(latencies, latency_count, stats);
-    
-    thread_data.should_exit = true;
-    interrupt_signal(write_intr);  // Wake up thread to check should_exit
-    pthread_join(notif_thread, NULL);
     
     interrupt_destroy(read_intr);
     interrupt_destroy(write_intr);

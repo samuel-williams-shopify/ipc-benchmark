@@ -23,7 +23,7 @@ static inline int futex_wake(volatile atomic_uint* uaddr, int count) {
 }
 
 // Wait until the given atomic_bool `*condition` becomes true. Uses `*futex_word` as a version counter to block on.
-void futex_wait_for_atomic_bool(atomic_uint *futex_word, atomic_bool *condition) {
+static void futex_wait_for_atomic_bool(atomic_uint *futex_word, atomic_bool *condition) {
     while (!atomic_load_explicit(condition, memory_order_acquire)) {
         uint32_t val = atomic_load_explicit(futex_word, memory_order_acquire);
 
@@ -39,7 +39,7 @@ void futex_wait_for_atomic_bool(atomic_uint *futex_word, atomic_bool *condition)
 // @parameter futex_word Atomic uint32_t futex version counter.
 // @parameter condition Atomic boolean condition to set.
 // @parameter count Number of threads to wake (1 for signal, INT_MAX for broadcast).
-void futex_signal_atomic_bool(atomic_uint *futex_word, atomic_bool *condition, int count) {
+static void futex_signal_atomic_bool(atomic_uint *futex_word, atomic_bool *condition, int count) {
     atomic_store_explicit(condition, true, memory_order_release);
     atomic_fetch_add_explicit(futex_word, 1, memory_order_acq_rel);
     futex_wake(futex_word, count);
@@ -247,13 +247,11 @@ void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
     
-    fprintf(stderr, "Server: Starting benchmark\n");
+    printf("Server ready to process messages\n");
     
     while (get_timestamp_us() < end_time) {
         // Wait for message to become available
-        fprintf(stderr, "Server: Waiting for message\n");
         futex_wait_for_atomic_bool(&rb->server_futex, &rb->message_available);
-        fprintf(stderr, "Server: Message available\n");
 
         // Read message from ring buffer
         size_t msg_size;
@@ -269,25 +267,20 @@ void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs
             
             // Simulate work
             if (work_secs > 0) {
-                fprintf(stderr, "Server: Simulating work for %.2f seconds\n", work_secs);
                 usleep(work_secs * 1000000);
             }
             
             // Echo the message back
-            fprintf(stderr, "Server: Writing response back to client\n");
             if (!ring_buffer_write(rb, buffer, msg_size)) {
                 fprintf(stderr, "Server: Failed to write response to ring buffer\n");
             } else {
                 // Signal client that response is available
-                fprintf(stderr, "Server: Signaling client about response\n");
                 futex_signal_atomic_bool(&rb->client_futex, &rb->response_available, 1);
             }
         } else {
             fprintf(stderr, "Server: Failed to read message from ring buffer\n");
         }
     }
-    
-    fprintf(stderr, "Server: Benchmark complete\n");
     
     // Cleanup
     free(buffer);
@@ -318,20 +311,16 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
 
-    fprintf(stderr, "Client: Starting benchmark\n");
-
     while (get_timestamp_us() < end_time) {
         // Send message
         random_message(msg, 2048, 4096);
         msg->timestamp = get_timestamp_us();
-        fprintf(stderr, "Client: Writing message to ring buffer\n");
         if (!ring_buffer_write(rb, buffer, msg->size)) {
             fprintf(stderr, "Client: Failed to write message to ring buffer\n");
             break;
         }
         
         // Signal server that message is available
-        fprintf(stderr, "Client: Signaling server about message\n");
         futex_signal_atomic_bool(&rb->server_futex, &rb->message_available, 1);
 
         // Check ready
@@ -341,16 +330,13 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
         }
 
         // Wait for response
-        fprintf(stderr, "Client: Waiting for response\n");
         futex_wait_for_atomic_bool(&rb->client_futex, &rb->response_available);
-        fprintf(stderr, "Client: Response available\n");
-
+            
         // Try to read the response
         size_t msg_size;
         bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
         if (!read_success) {
             fprintf(stderr, "Client: Failed to read response from ring buffer\n");
-            break;
         }
         
         atomic_store_explicit(&rb->response_available, false, memory_order_release);
@@ -371,21 +357,18 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
         // Update statistics
         stats->ops++;
         stats->bytes += msg_size;
-        fprintf(stderr, "Client: Completed message cycle %zu with latency %llu us\n", stats->ops, latency);
     }
 
     double cpu_end = get_cpu_usage();
     stats->cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);
     calculate_stats(latencies, latency_count, stats);
-    
+        
     free(buffer);
     free(latencies);
-    fprintf(stderr, "Client: Benchmark complete\n");
 }
 
 void free_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb) {
     if (rb) {
-        fprintf(stderr, "Server: Signaling client about shutdown\n");
         // Signal client that server is shutting down
         atomic_store_explicit(&rb->ready, false, memory_order_release);
 
@@ -393,7 +376,6 @@ void free_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb) {
         futex_signal_atomic_bool(&rb->client_futex, &rb->response_available, INT_MAX);
         futex_signal_atomic_bool(&rb->server_futex, &rb->message_available, INT_MAX);
         
-        fprintf(stderr, "Server: Unmapping shared memory\n");
         munmap(rb, sizeof(LockFreeBlockingRingBuffer) + rb->size);
         shm_unlink(SHM_NAME);
     }

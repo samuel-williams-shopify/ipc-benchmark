@@ -192,7 +192,7 @@ void run_lfnbshm_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs) {
         // Wait for message using io_uring futex
         struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
         uint32_t message_available = atomic_load(&rb->message_available);
-        io_uring_prep_futex_wait(sqe, (uint32_t*)&rb->message_available, message_available, 0, FUTEX_PRIVATE_FLAG);
+        io_uring_prep_futex_wait(sqe, (uint32_t*)&rb->message_available, message_available, 0, 0, FUTEX_PRIVATE_FLAG);
         
         struct io_uring_cqe* cqe;
         if (io_uring_submit_and_wait(&ring, 1) < 0) {
@@ -225,7 +225,7 @@ void run_lfnbshm_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs) {
             // Wake client using io_uring futex
             sqe = io_uring_get_sqe(&ring);
             uint32_t response_available = atomic_load(&rb->response_available);
-            io_uring_prep_futex_wake(sqe, (uint32_t*)&rb->response_available, response_available, 1, FUTEX_PRIVATE_FLAG);
+            io_uring_prep_futex_wake(sqe, (uint32_t*)&rb->response_available, response_available, 1, 0, FUTEX_PRIVATE_FLAG);
             io_uring_submit(&ring);
         }
     }

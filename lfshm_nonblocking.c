@@ -11,8 +11,6 @@
 #include <sys/syscall.h>
 #include <linux/futex.h>
 
-#define SHM_NAME "/lfushm_ring_buffer"
-
 /* Setup shared memory with io_uring futex operations */
 LockFreeNonBlockingRingBuffer* setup_lfnbshm(size_t size, bool is_server) {
     int fd = -1;
@@ -193,7 +191,8 @@ void run_lfnbshm_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs) {
     while (get_timestamp_us() < end_time) {
         // Wait for message using io_uring futex
         struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-        io_uring_prep_futex_wait(sqe, &rb->message_available, 0, NULL, FUTEX_PRIVATE_FLAG);
+        uint32_t message_available = atomic_load(&rb->message_available);
+        io_uring_prep_futex_wait(sqe, (uint32_t*)&rb->message_available, message_available, 0, FUTEX_PRIVATE_FLAG);
         
         struct io_uring_cqe* cqe;
         if (io_uring_submit_and_wait(&ring, 1) < 0) {
@@ -225,7 +224,8 @@ void run_lfnbshm_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs) {
             
             // Wake client using io_uring futex
             sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_futex_wake(sqe, &rb->response_available, 1, FUTEX_PRIVATE_FLAG);
+            uint32_t response_available = atomic_load(&rb->response_available);
+            io_uring_prep_futex_wake(sqe, (uint32_t*)&rb->response_available, response_available, 1, FUTEX_PRIVATE_FLAG);
             io_uring_submit(&ring);
         }
     }

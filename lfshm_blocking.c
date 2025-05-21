@@ -229,7 +229,8 @@ void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs
         // Check if there's a message available
         if (!atomic_load_explicit(&rb->message_available, memory_order_acquire)) {
             // Wait for client to write
-            futex_wait((volatile uint32_t*)&rb->server_futex, atomic_load_explicit(&rb->server_futex, memory_order_acquire));
+            uint32_t current_val = atomic_load_explicit(&rb->server_futex, memory_order_acquire);
+            futex_wait((volatile uint32_t*)&rb->server_futex, current_val);
             continue;
         }
 
@@ -256,7 +257,8 @@ void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs
                 atomic_store_explicit(&rb->response_available, true, memory_order_release);
                 atomic_store_explicit(&rb->message_available, false, memory_order_release);
                 
-                // Wake up client if it's waiting
+                // Increment client futex and wake up client
+                atomic_fetch_add_explicit(&rb->client_futex, 1, memory_order_release);
                 futex_wake((volatile uint32_t*)&rb->client_futex, 1);
             }
         }
@@ -304,7 +306,8 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
         atomic_store_explicit(&rb->message_available, true, memory_order_release);
         atomic_store_explicit(&rb->response_available, false, memory_order_release);
         
-        // Wake up server
+        // Increment server futex and wake up server
+        atomic_fetch_add_explicit(&rb->server_futex, 1, memory_order_release);
         futex_wake((volatile uint32_t*)&rb->server_futex, 1);
 
         // Wait for response
@@ -315,7 +318,8 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
             // Check if response is available
             if (!atomic_load_explicit(&rb->response_available, memory_order_acquire)) {
                 // Wait for server to write
-                futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_explicit(&rb->client_futex, memory_order_acquire));
+                uint32_t current_val = atomic_load_explicit(&rb->client_futex, memory_order_acquire);
+                futex_wait((volatile uint32_t*)&rb->client_futex, current_val);
                 continue;
             }
             

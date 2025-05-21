@@ -64,7 +64,6 @@ LockFreeNonBlockingRingBuffer* setup_lfshm_blocking(size_t size, bool is_server)
     atomic_store_explicit(&rb->server_futex, 0, memory_order_release);
     atomic_store_explicit(&rb->client_futex, 0, memory_order_release);
     atomic_store_explicit(&rb->ready, true, memory_order_release);
-    rb->is_server = is_server;
 
     close(fd);
     return rb;
@@ -310,7 +309,5 @@ void run_lfshm_blocking_client(LockFreeNonBlockingRingBuffer* rb, int duration_s
 
 void free_lfshm_blocking(LockFreeNonBlockingRingBuffer* rb) {
     munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + rb->size);
-    if (rb->is_server) {
-        shm_unlink(SHM_NAME);
-    }
+    shm_unlink(SHM_NAME);
 } 

@@ -35,12 +35,14 @@ int main(int argc, char* argv[]);
 void print_usage(const char* prog_name) {
     fprintf(stderr, "Usage: %s [options]\n", prog_name);
     fprintf(stderr, "Options:\n");
-    fprintf(stderr, "  -s, --server           Run as server\n");
-    fprintf(stderr, "  -c, --client           Run as client\n");
-    fprintf(stderr, "  -m, --mode MODE        IPC mode (uds-blocking, uds-nonblocking, shm-notification, shm-blocking, lfshm-blocking, lfshm-nonblocking)\n");
-    fprintf(stderr, "  -d, --duration SECS    Benchmark duration in seconds\n");
-    fprintf(stderr, "  -w, --work SECS        Server work time in seconds (default: 0)\n");
-    fprintf(stderr, "  -h, --help             Show this help message\n");
+    fprintf(stderr, "  -s, --server             Run as server\n");
+    fprintf(stderr, "  -c, --client             Run as client\n");
+    fprintf(stderr, "  -m, --mode MODE          IPC mode (uds-blocking, uds-nonblocking, shm-notification, shm-blocking, lfshm-blocking, lfshm-nonblocking)\n");
+    fprintf(stderr, "  -d, --duration SECS      Benchmark duration in seconds\n");
+    fprintf(stderr, "  -w, --work SECS          Server work time in seconds (default: 0)\n");
+    fprintf(stderr, "  -h, --help               Show this help message\n");
+    fprintf(stderr, "\nEnvironment Variables:\n");
+    fprintf(stderr, "  IPC_BENCHMARK_WORK_SECS  Default server work time in seconds\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -49,6 +51,16 @@ int main(int argc, char* argv[]) {
     const char* mode = NULL;
     int duration_secs = RUN_DURATION;
     float work_secs = 0.0f;
+
+    // Check for environment variable first
+    const char* work_env = getenv("IPC_BENCHMARK_WORK_SECS");
+    if (work_env) {
+        work_secs = atof(work_env);
+        if (work_secs < 0) {
+            fprintf(stderr, "Invalid work time in IPC_BENCHMARK_WORK_SECS\n");
+            return 1;
+        }
+    }
 
     signal(SIGPIPE, SIG_IGN);
 

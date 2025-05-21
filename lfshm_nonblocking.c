@@ -314,7 +314,7 @@ void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duratio
             }
 
             uint32_t current_val = atomic_load_explicit(&rb->client_futex, memory_order_acquire);
-            io_uring_prep_futex_wait(sqe, (uint32_t*)&rb->client_futex, current_val, 0, 0);
+            io_uring_prep_futex_wait(sqe, (uint32_t*)&rb->client_futex, current_val, FUTEX_PRIVATE_FLAG, 0, 0);
 
             // Submit the futex wait request
             if (io_uring_submit(&ring) < 0) {

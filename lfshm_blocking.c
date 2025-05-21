@@ -297,27 +297,30 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
         size_t msg_size;
         bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
         
-        if (read_success) {
-            Message* response = (Message*)buffer;
-            if (!validate_message(response, msg_size)) {
-                fprintf(stderr, "Client: Message validation failed\n");
-            }
-            
-            // Calculate latency
-            uint64_t now = get_timestamp_us();
-            uint64_t latency = now - response->timestamp;
-            
-            if (latency_count < MAX_LATENCIES) {
-                latencies[latency_count++] = latency;
-            }
-            
-            // Update statistics
-            stats->ops++;
-            stats->bytes += msg_size;
-        } else {
+        while (!read_success) {
             // Wait for server to write
             futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_explicit(&rb->client_futex, memory_order_acquire));
+
+            // Retry the read
+            read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
         }
+
+        Message* response = (Message*)buffer;
+        if (!validate_message(response, msg_size)) {
+            fprintf(stderr, "Client: Message validation failed\n");
+        }
+        
+        // Calculate latency
+        uint64_t now = get_timestamp_us();
+        uint64_t latency = now - response->timestamp;
+        
+        if (latency_count < MAX_LATENCIES) {
+            latencies[latency_count++] = latency;
+        }
+        
+        // Update statistics
+        stats->ops++;
+        stats->bytes += msg_size;
     }
 
     double cpu_end = get_cpu_usage();

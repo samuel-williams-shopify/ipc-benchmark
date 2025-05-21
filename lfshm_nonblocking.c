@@ -307,24 +307,7 @@ void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duratio
         size_t msg_size;
         bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
         
-        if (read_success) {
-            Message* response = (Message*)buffer;
-            if (!validate_message(response, msg_size)) {
-                fprintf(stderr, "Client: Message validation failed\n");
-            }
-            
-            // Calculate latency
-            uint64_t now = get_timestamp_us();
-            uint64_t latency = now - response->timestamp;
-            
-            if (latency_count < MAX_LATENCIES) {
-                latencies[latency_count++] = latency;
-            }
-            
-            // Update statistics
-            stats->ops++;
-            stats->bytes += msg_size;
-        } else {
+        while (!read_success) {
             // Setup futex wait using io_uring
             struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
             if (!sqe) {
@@ -350,7 +333,27 @@ void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duratio
 
             // Mark the completion as seen
             io_uring_cqe_seen(&ring, cqe);
+
+            // Retry the read
+            read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
         }
+
+        Message* response = (Message*)buffer;
+        if (!validate_message(response, msg_size)) {
+            fprintf(stderr, "Client: Message validation failed\n");
+        }
+        
+        // Calculate latency
+        uint64_t now = get_timestamp_us();
+        uint64_t latency = now - response->timestamp;
+        
+        if (latency_count < MAX_LATENCIES) {
+            latencies[latency_count++] = latency;
+        }
+        
+        // Update statistics
+        stats->ops++;
+        stats->bytes += msg_size;
     }
 
     double cpu_end = get_cpu_usage();

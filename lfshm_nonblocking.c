@@ -35,7 +35,9 @@ LockFreeNonBlockingRingBuffer* setup_lfshm_nonblocking(size_t size, bool is_serv
     total_size = (total_size + page_size - 1) & ~(page_size - 1);
 
     // Create and truncate shared memory
-    shm_unlink(SHM_NAME); // Ensure old segment is gone
+    if (is_server) {
+        shm_unlink(SHM_NAME); // Ensure old segment is gone
+    }
     fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
     if (fd == -1) {
         perror("shm_open");

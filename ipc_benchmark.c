@@ -164,12 +164,13 @@ int main(int argc, char* argv[]) {
         }
         if (is_server) {
             run_shm_nonblocking_server(rb, duration_secs, work_secs);
+            free_shm_nonblocking_server(rb);
         } else {
             BenchmarkStats stats = {0};
             run_shm_nonblocking_client(rb, duration_secs, &stats);
             print_stats(&stats, "Notification-based Shared Memory");
+            free_shm_nonblocking_client(rb);
         }
-        free_shm_nonblocking(rb);
     } else if (strcmp(mode, "shm-blocking") == 0) {
         if (is_server) {
             BlockingRingBuffer* rb = setup_shm_blocking(BUFFER_SIZE, true);
@@ -178,7 +179,7 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             run_shm_blocking_server(rb, duration_secs, work_secs);
-            free_shm_blocking(rb);
+            free_shm_blocking_server(rb);
         } else {
             BlockingRingBuffer* rb = setup_shm_blocking(BUFFER_SIZE, false);
             if (!rb) {
@@ -188,7 +189,7 @@ int main(int argc, char* argv[]) {
             BenchmarkStats stats = {0};
             run_shm_blocking_client(rb, duration_secs, &stats);
             print_stats(&stats, "Blocking Shared Memory");
-            free_shm_blocking(rb);
+            free_shm_blocking_client(rb);
         }
     } else if (strcmp(mode, "lfshm-blocking") == 0) {
 #ifdef __linux__
@@ -199,7 +200,7 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             run_lfshm_blocking_server(rb, duration_secs, work_secs);
-            free_lfshm_blocking(rb);
+            free_lfshm_blocking_server(rb);
         } else {
             LockFreeBlockingRingBuffer* rb = setup_lfshm_blocking(BUFFER_SIZE, false);
             if (!rb) {
@@ -209,7 +210,7 @@ int main(int argc, char* argv[]) {
             BenchmarkStats stats = {0};
             run_lfshm_blocking_client(rb, duration_secs, &stats);
             print_stats(&stats, "Lock-free Blocking Shared Memory");
-            free_lfshm_blocking(rb);
+            free_lfshm_blocking_client(rb);
         }
 #else
         fprintf(stderr, "Lock-free Blocking Shared Memory is only available on Linux\n");
@@ -224,7 +225,7 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             run_lfshm_nonblocking_server(rb, duration_secs, work_secs);
-            free_lfshm_nonblocking(rb);
+            free_lfshm_nonblocking_server(rb);
         } else {
             LockFreeNonBlockingRingBuffer* rb = setup_lfshm_nonblocking(BUFFER_SIZE, false);
             if (!rb) {
@@ -234,7 +235,7 @@ int main(int argc, char* argv[]) {
             BenchmarkStats stats = {0};
             run_lfshm_nonblocking_client(rb, duration_secs, &stats);
             print_stats(&stats, "Lock-free Non-Blocking Shared Memory");
-            free_lfshm_nonblocking(rb);
+            free_lfshm_nonblocking_client(rb);
         }
 #else
         fprintf(stderr, "Lock-free Non-Blocking Shared Memory is only available on Linux\n");
@@ -248,7 +249,7 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             run_shm_nonblocking_server(rb, duration_secs, work_secs);
-            free_shm_nonblocking(rb);
+            free_shm_nonblocking_server(rb);
         } else {
             NonBlockingRingBuffer* rb = setup_shm_nonblocking(BUFFER_SIZE, false);
             if (!rb) {
@@ -258,7 +259,7 @@ int main(int argc, char* argv[]) {
             BenchmarkStats stats = {0};
             run_shm_nonblocking_client(rb, duration_secs, &stats);
             print_stats(&stats, "Non-Blocking Shared Memory");
-            free_shm_nonblocking(rb);
+            free_shm_nonblocking_client(rb);
         }
     } else {
         fprintf(stderr, "Invalid IPC mode: %s\n", mode);

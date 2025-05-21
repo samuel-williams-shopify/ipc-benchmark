@@ -16,12 +16,12 @@ typedef struct {
     bool message_available;
     bool response_available;
     bool ready;
-    bool is_server;
-    char* buffer;
+    char buffer[0];
 } BlockingRingBuffer;
 
 BlockingRingBuffer* setup_shm_blocking(size_t size, bool is_server);
-void free_shm_blocking(BlockingRingBuffer* rb);
+void free_shm_blocking_server(BlockingRingBuffer* rb);
+void free_shm_blocking_client(BlockingRingBuffer* rb);
 void run_shm_blocking_server(BlockingRingBuffer* rb, int duration_secs, float work_secs);
 void run_shm_blocking_client(BlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats);
 

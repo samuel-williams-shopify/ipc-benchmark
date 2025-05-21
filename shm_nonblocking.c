@@ -228,18 +228,17 @@ NonBlockingRingBuffer* setup_shm_nonblocking(size_t size, bool is_server) {
     rb->message_available = false;
     rb->response_available = false;
     rb->ready = is_server;
-    rb->is_server = is_server;
-    rb->buffer = (char*)rb + sizeof(NonBlockingRingBuffer);
-
     close(fd);
     return rb;
 }
 
-void free_shm_nonblocking(NonBlockingRingBuffer* rb) {
-    if (rb) {
-        munmap(rb, sizeof(NonBlockingRingBuffer) + rb->size);
-        shm_unlink(SHM_NAME);
-    }
+void free_shm_nonblocking_server(NonBlockingRingBuffer* rb) {
+    munmap(rb, sizeof(NonBlockingRingBuffer) + rb->size);
+    shm_unlink(SHM_NAME);
+}
+
+void free_shm_nonblocking_client(NonBlockingRingBuffer* rb) {
+    munmap(rb, sizeof(NonBlockingRingBuffer) + rb->size);
 }
 
 void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {

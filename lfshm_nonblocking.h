@@ -28,7 +28,8 @@ typedef struct {
 
 // Function prototypes
 LockFreeNonBlockingRingBuffer* setup_lfshm_nonblocking(size_t size, bool is_server);
-void free_lfshm_nonblocking(LockFreeNonBlockingRingBuffer* rb);
+void free_lfshm_nonblocking_server(LockFreeNonBlockingRingBuffer* rb);
+void free_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb);
 void run_lfshm_nonblocking_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs, float work_secs);
 void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats);
 

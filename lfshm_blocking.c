@@ -312,7 +312,11 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
     munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
 }
 
-void free_lfshm_blocking(LockFreeBlockingRingBuffer* rb) {
+void free_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb) {
     munmap(rb, sizeof(LockFreeBlockingRingBuffer) + rb->size);
     shm_unlink(SHM_NAME);
+}
+
+void free_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb) {
+    munmap(rb, sizeof(LockFreeBlockingRingBuffer) + rb->size);
 } 

@@ -186,18 +186,18 @@ BlockingRingBuffer* setup_shm_blocking(size_t size, bool is_server) {
     rb->message_available = false;
     rb->response_available = false;
     rb->ready = is_server;
-    rb->is_server = is_server;
-    rb->buffer = (char*)rb + sizeof(BlockingRingBuffer);
 
     close(fd);
     return rb;
 }
 
-void free_shm_blocking(BlockingRingBuffer* rb) {
-    if (rb) {
-        munmap(rb, sizeof(BlockingRingBuffer) + rb->size);
-        shm_unlink(SHM_NAME);
-    }
+void free_shm_blocking_server(BlockingRingBuffer* rb) {
+    munmap(rb, sizeof(BlockingRingBuffer) + rb->size);
+    shm_unlink(SHM_NAME);
+}
+
+void free_shm_blocking_client(BlockingRingBuffer* rb) {
+    munmap(rb, sizeof(BlockingRingBuffer) + rb->size);
 }
 
 void run_shm_blocking_server(BlockingRingBuffer* rb, int duration_secs, float work_secs) {

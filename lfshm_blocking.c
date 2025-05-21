@@ -223,17 +223,21 @@ void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
     
-    printf("Server ready to process messages\n");
+    fprintf(stderr, "Server: Starting benchmark\n");
     
     while (get_timestamp_us() < end_time) {
         // Check if there's a message available
         if (!atomic_load_explicit(&rb->message_available, memory_order_acquire)) {
+            fprintf(stderr, "Server: No message available, waiting...\n");
             // Wait for client to write
             uint32_t current_val = atomic_load_explicit(&rb->server_futex, memory_order_acquire);
+            fprintf(stderr, "Server: Waiting on futex with value %u\n", current_val);
             futex_wait((volatile uint32_t*)&rb->server_futex, current_val);
+            fprintf(stderr, "Server: Woken up from futex wait\n");
             continue;
         }
 
+        fprintf(stderr, "Server: Message available, attempting to read\n");
         // Read message from ring buffer
         size_t msg_size;
         bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
@@ -246,23 +250,31 @@ void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs
             
             // Simulate work
             if (work_secs > 0) {
+                fprintf(stderr, "Server: Simulating work for %.2f seconds\n", work_secs);
                 usleep(work_secs * 1000000);
             }
             
             // Echo the message back
+            fprintf(stderr, "Server: Writing response back to client\n");
             if (!ring_buffer_write(rb, buffer, msg_size)) {
-                fprintf(stderr, "Failed to write response to ring buffer\n");
+                fprintf(stderr, "Server: Failed to write response to ring buffer\n");
             } else {
                 // Set response as available and message as not available
                 atomic_store_explicit(&rb->response_available, true, memory_order_release);
                 atomic_store_explicit(&rb->message_available, false, memory_order_release);
                 
                 // Increment client futex and wake up client
-                atomic_fetch_add_explicit(&rb->client_futex, 1, memory_order_release);
+                uint32_t old_val = atomic_fetch_add_explicit(&rb->client_futex, 1, memory_order_release);
+                fprintf(stderr, "Server: Incremented client futex from %u to %u\n", old_val, old_val + 1);
                 futex_wake((volatile uint32_t*)&rb->client_futex, 1);
+                fprintf(stderr, "Server: Woke up client\n");
             }
+        } else {
+            fprintf(stderr, "Server: Failed to read message from ring buffer\n");
         }
     }
+    
+    fprintf(stderr, "Server: Benchmark complete\n");
     
     // Cleanup
     free(buffer);
@@ -293,12 +305,15 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
 
+    fprintf(stderr, "Client: Starting benchmark\n");
+
     while (get_timestamp_us() < end_time) {
         // Send message
         random_message(msg, 2048, 4096);
         msg->timestamp = get_timestamp_us();
+        fprintf(stderr, "Client: Writing message to ring buffer\n");
         if (!ring_buffer_write(rb, buffer, msg->size)) {
-            fprintf(stderr, "Failed to write message to ring buffer\n");
+            fprintf(stderr, "Client: Failed to write message to ring buffer\n");
             break;
         }
         
@@ -307,24 +322,33 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
         atomic_store_explicit(&rb->response_available, false, memory_order_release);
         
         // Increment server futex and wake up server
-        atomic_fetch_add_explicit(&rb->server_futex, 1, memory_order_release);
+        uint32_t old_val = atomic_fetch_add_explicit(&rb->server_futex, 1, memory_order_release);
+        fprintf(stderr, "Client: Incremented server futex from %u to %u\n", old_val, old_val + 1);
         futex_wake((volatile uint32_t*)&rb->server_futex, 1);
+        fprintf(stderr, "Client: Woke up server\n");
 
         // Wait for response
         size_t msg_size;
         bool read_success = false;
         
+        fprintf(stderr, "Client: Waiting for response\n");
         while (!read_success) {
             // Check if response is available
             if (!atomic_load_explicit(&rb->response_available, memory_order_acquire)) {
                 // Wait for server to write
                 uint32_t current_val = atomic_load_explicit(&rb->client_futex, memory_order_acquire);
+                fprintf(stderr, "Client: No response available, waiting on futex with value %u\n", current_val);
                 futex_wait((volatile uint32_t*)&rb->client_futex, current_val);
+                fprintf(stderr, "Client: Woken up from futex wait\n");
                 continue;
             }
             
             // Try to read the response
+            fprintf(stderr, "Client: Response available, attempting to read\n");
             read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
+            if (!read_success) {
+                fprintf(stderr, "Client: Failed to read response from ring buffer\n");
+            }
         }
 
         Message* response = (Message*)buffer;
@@ -343,6 +367,7 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
         // Update statistics
         stats->ops++;
         stats->bytes += msg_size;
+        fprintf(stderr, "Client: Completed message cycle %zu with latency %llu us\n", stats->ops, latency);
     }
 
     double cpu_end = get_cpu_usage();
@@ -351,6 +376,7 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
     
     free(buffer);
     free(latencies);
+    fprintf(stderr, "Client: Benchmark complete\n");
 }
 
 void free_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb) {

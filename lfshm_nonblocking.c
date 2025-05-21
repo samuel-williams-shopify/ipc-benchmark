@@ -1,4 +1,4 @@
-#include "lfshm_blocking.h"
+#include "lfshm_nonblocking.h"
 #include "benchmark.h"
 #include <stdio.h>
 #include <stdlib.h>

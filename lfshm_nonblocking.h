@@ -9,7 +9,7 @@
 #include <liburing.h>
 #include "benchmark.h"
 
-struct {
+typedef struct {
     // Server-side fields (aligned to cache line)
     atomic_uint write_pos;
     atomic_uint server_futex;

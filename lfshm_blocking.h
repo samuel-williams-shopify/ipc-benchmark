@@ -9,7 +9,7 @@
 #include "benchmark.h"
 
 // Structure for lock-free blocking shared memory ring buffer
-struct {
+typedef struct {
     // Server-side fields (aligned to cache line)
     atomic_uint write_pos;
     atomic_uint server_futex;

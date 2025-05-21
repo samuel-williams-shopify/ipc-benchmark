@@ -7,6 +7,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <liburing.h>
+#include "benchmark.h"
 
 // Structure for lock-free non-blocking shared memory ring buffer
 typedef struct {
@@ -26,6 +27,6 @@ typedef struct {
 LockFreeNonBlockingRingBuffer* setup_lfshm_nonblocking(size_t size, bool is_server);
 void free_lfshm_nonblocking(LockFreeNonBlockingRingBuffer* rb);
 void run_lfshm_nonblocking_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs);
-void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duration_secs, void* stats);
+void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats);
 
 #endif // LFSHM_NONBLOCKING_H

@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include <sys/select.h>
+#include <time.h>
 
 #define SHM_NAME "/shm_nonblocking"
 
@@ -52,8 +53,6 @@ static bool ring_buffer_read(NonBlockingRingBuffer* rb, void* data, size_t max_l
             read_pos = 0;
         }
     }
-
-    // fprintf(stderr, "Reading message len=%zu\n", msg_len);
     
     // Check if message fits in the provided buffer
     if (msg_len > max_len) {
@@ -78,7 +77,6 @@ static bool ring_buffer_read(NonBlockingRingBuffer* rb, void* data, size_t max_l
     
     // Update the read position
     rb->read_pos = read_pos;
-    rb->message_available = false;
     *bytes_read = msg_len;
     
     return true;
@@ -86,16 +84,22 @@ static bool ring_buffer_read(NonBlockingRingBuffer* rb, void* data, size_t max_l
 
 /* Write a message to the ring buffer */
 static bool ring_buffer_write(NonBlockingRingBuffer* rb, const void* data, size_t len) {
-    // fprintf(stderr, "Writing message to ring buffer len=%zu\n", len);
-
     if (len > rb->size / 2) {
         // Prevent a single message from taking more than half the buffer
         return false;
     }
     
-    // Wait for space in the buffer
-    while (rb->write_pos == rb->read_pos && rb->message_available) {
-        pthread_cond_wait(&rb->server_cond, &rb->mutex);
+    // Check if there's enough space
+    size_t available;
+    if (rb->write_pos >= rb->read_pos) {
+        available = rb->size - (rb->write_pos - rb->read_pos);
+    } else {
+        available = rb->read_pos - rb->write_pos;
+    }
+    
+    // Check if there's enough space (reserving 1 byte to distinguish empty from full)
+    if (available <= len + sizeof(uint32_t) + 1) {
+        return false;
     }
     
     // Write the message
@@ -135,49 +139,8 @@ static bool ring_buffer_write(NonBlockingRingBuffer* rb, const void* data, size_
     
     // Update the write position
     rb->write_pos = write_pos;
-    rb->message_available = true;
-    pthread_cond_signal(&rb->server_cond);
     
     return true;
-}
-
-/* Thread function that handles all shared memory operations */
-static void* notification_thread(void* arg) {
-    ThreadData* data = (ThreadData*)arg;
-    NonBlockingRingBuffer* rb = data->rb;
-    
-    fprintf(stderr, "Client thread started\n");
-    fflush(stderr);
-    
-    while (!data->should_exit) {
-        interrupt_wait(data->write_intr);
-        
-        pthread_mutex_lock(&rb->mutex);
-        
-        // Write the message
-        if (!ring_buffer_write(rb, data->msg, data->msg->size)) {
-            fprintf(stderr, "Failed to write message to ring buffer\n");
-            pthread_mutex_unlock(&rb->mutex);
-            continue;
-        }
-        
-        // Wait for response
-        while (!rb->message_available) {
-            pthread_cond_wait(&rb->server_cond, &rb->mutex);
-        }
-        
-        // Read the message
-        *data->read_success = ring_buffer_read(rb, data->msg, MAX_MSG_SIZE, data->msg_size);
-        
-        pthread_mutex_unlock(&rb->mutex);
-
-        // Signal the interrupt to wake up the select() loop
-        interrupt_signal(data->read_intr);
-    }
-    
-    fprintf(stderr, "Client thread exiting\n");
-    fflush(stderr);
-    return NULL;
 }
 
 NonBlockingRingBuffer* setup_shm_nonblocking(size_t size, bool is_server) {
@@ -185,67 +148,168 @@ NonBlockingRingBuffer* setup_shm_nonblocking(size_t size, bool is_server) {
     NonBlockingRingBuffer* rb = NULL;
     size_t total_size = sizeof(NonBlockingRingBuffer) + size;
 
-    // Create and truncate shared memory
-    shm_unlink(SHM_NAME); // Ensure old segment is gone
-    fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
-    if (fd == -1) {
-        perror("shm_open");
-        return NULL;
+    if (is_server) {
+        shm_unlink(SHM_NAME); // Ensure old segment is gone
+        fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
+        if (fd == -1) {
+            perror("shm_open");
+            return NULL;
+        }
+
+        if (ftruncate(fd, total_size) == -1) {
+            perror("ftruncate");
+            close(fd);
+            shm_unlink(SHM_NAME);
+            return NULL;
+        }
+
+        rb = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (rb == MAP_FAILED) {
+            perror("mmap");
+            close(fd);
+            shm_unlink(SHM_NAME);
+            return NULL;
+        }
+
+        // Initialize the ring buffer
+        pthread_mutexattr_t mutex_attr;
+        pthread_mutexattr_init(&mutex_attr);
+        pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
+        pthread_mutex_init(&rb->mutex, &mutex_attr);
+        pthread_mutexattr_destroy(&mutex_attr);
+
+        pthread_condattr_t cond_attr;
+        pthread_condattr_init(&cond_attr);
+        pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
+        pthread_cond_init(&rb->server_cond, &cond_attr);
+        pthread_cond_init(&rb->client_cond, &cond_attr);
+        pthread_condattr_destroy(&cond_attr);
+
+        rb->read_pos = 0;
+        rb->write_pos = 0;
+        rb->size = size;
+        rb->message_available = false;
+        rb->response_available = false;
+        rb->ready = true;
+    } else {
+        fd = shm_open(SHM_NAME, O_RDWR, 0666);
+        if (fd == -1) {
+            perror("shm_open");
+            return NULL;
+        }
+
+        rb = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (rb == MAP_FAILED) {
+            perror("mmap");
+            close(fd);
+            return NULL;
+        }
+
+        while (!rb->ready) {
+            usleep(1000);
+        }
     }
 
-    if (ftruncate(fd, total_size) == -1) {
-        perror("ftruncate");
-        close(fd);
-        shm_unlink(SHM_NAME);
-        return NULL;
-    }
-
-    rb = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (rb == MAP_FAILED) {
-        perror("mmap");
-        close(fd);
-        shm_unlink(SHM_NAME);
-        return NULL;
-    }
-
-    // Initialize the ring buffer
-    pthread_mutexattr_t mutex_attr;
-    pthread_mutexattr_init(&mutex_attr);
-    pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
-    pthread_mutex_init(&rb->mutex, &mutex_attr);
-    pthread_mutexattr_destroy(&mutex_attr);
-
-    pthread_condattr_t cond_attr;
-    pthread_condattr_init(&cond_attr);
-    pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
-    pthread_cond_init(&rb->server_cond, &cond_attr);
-    pthread_cond_init(&rb->client_cond, &cond_attr);
-    pthread_condattr_destroy(&cond_attr);
-
-    rb->read_pos = 0;
-    rb->write_pos = 0;
-    rb->size = size;
-    rb->message_available = false;
-    rb->response_available = false;
-    rb->ready = is_server;
     close(fd);
     return rb;
 }
 
-void free_shm_nonblocking_server(NonBlockingRingBuffer* rb) {
-    if (rb) {
-        pthread_mutex_destroy(&rb->mutex);
-        pthread_cond_destroy(&rb->server_cond);
-        pthread_cond_destroy(&rb->client_cond);
-        munmap(rb, sizeof(NonBlockingRingBuffer) + rb->size);
-        shm_unlink(SHM_NAME);
+void run_shm_nonblocking_server(NonBlockingRingBuffer* rb, int duration_secs, float work_secs) {
+    void* buffer = malloc(MAX_MSG_SIZE);
+    if (!buffer) {
+        perror("malloc");
+        return;
     }
+
+    uint64_t start_time = get_timestamp_us();
+    uint64_t end_time = start_time + (duration_secs * 1000000ULL);
+
+    printf("Server ready to process messages\n");
+
+    while (get_timestamp_us() < end_time) {
+        pthread_mutex_lock(&rb->mutex);
+        while (!rb->message_available) {
+            pthread_cond_wait(&rb->server_cond, &rb->mutex);
+        }
+
+        size_t msg_size;
+        bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
+        
+        if (read_success) {
+            rb->message_available = false;
+            pthread_mutex_unlock(&rb->mutex);
+
+            Message* msg = (Message*)buffer;
+            if (!validate_message(msg, msg_size)) {
+                continue;
+            }
+            
+            if (work_secs > 0) {
+                usleep(work_secs * 1000000);
+            }
+            
+            pthread_mutex_lock(&rb->mutex);
+            if (ring_buffer_write(rb, buffer, msg_size)) {
+                rb->response_available = true;
+                pthread_cond_signal(&rb->client_cond);
+            }
+            pthread_mutex_unlock(&rb->mutex);
+        } else {
+            pthread_mutex_unlock(&rb->mutex);
+        }
+    }
+
+    fprintf(stderr, "Server exiting\n");
+    
+    free(buffer);
 }
 
-void free_shm_nonblocking_client(NonBlockingRingBuffer* rb) {
-    if (rb) {
-        munmap(rb, sizeof(NonBlockingRingBuffer) + rb->size);
+// Thread function that handles all shared memory operations
+static void* run_client_thread(void* arg) {
+    ThreadData* data = (ThreadData*)arg;
+    NonBlockingRingBuffer* rb = data->rb;
+
+    Message* msg = data->msg;
+    void* buffer = msg;
+
+    while (!data->should_exit) {
+        interrupt_wait(data->write_intr);
+
+        pthread_mutex_lock(&rb->mutex);
+
+        if (!ring_buffer_write(rb, buffer, msg->size)) {
+            pthread_mutex_unlock(&rb->mutex);
+            break;
+        }
+
+        rb->message_available = true;
+        pthread_cond_signal(&rb->server_cond);
+
+        if (!rb->ready) {
+            *data->read_success = false;
+            *data->msg_size = 0;
+
+            interrupt_signal(data->read_intr);
+            pthread_mutex_unlock(&rb->mutex);
+            
+            break;
+        }
+
+        while (!rb->response_available) {
+            pthread_cond_wait(&rb->client_cond, &rb->mutex);
+        }
+
+        size_t msg_size;
+        bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
+        *data->read_success = read_success;
+        *data->msg_size = msg_size;
+
+        rb->response_available = false;
+        pthread_mutex_unlock(&rb->mutex);
+        interrupt_signal(data->read_intr);
     }
+
+    return NULL;
 }
 
 void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
@@ -260,10 +324,7 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
         free(msg);
         return;
     }
-    size_t latency_count = 0;
-    double cpu_start = get_cpu_usage();
 
-    // Create interrupts for read and write events
     Interrupt* read_intr = interrupt_create();
     Interrupt* write_intr = interrupt_create();
     if (!read_intr || !write_intr) {
@@ -286,8 +347,8 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
         .read_success = &read_success
     };
 
-    pthread_t notif_thread;
-    if (pthread_create(&notif_thread, NULL, notification_thread, &thread_data) != 0) {
+    pthread_t client_thread;
+    if (pthread_create(&client_thread, NULL, run_client_thread, &thread_data) != 0) {
         perror("pthread_create");
         interrupt_destroy(read_intr);
         interrupt_destroy(write_intr);
@@ -296,45 +357,45 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
         return;
     }
 
-    // Benchmark phase
+    size_t latency_count = 0;
+    double cpu_start = get_cpu_usage();
     stats->ops = 0;
     stats->bytes = 0;
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
 
     while (get_timestamp_us() < end_time) {
-        // Send message
         random_message(msg, 2048, 4096);
         msg->timestamp = get_timestamp_us();
+
         interrupt_signal(write_intr);
 
-        // Wait for response
         interrupt_wait(read_intr);
-        
-        if (read_success) {
-            if (!validate_message(msg, msg_size)) {
-                fprintf(stderr, "Client: Message validation failed\n");
-            }
 
-            // Calculate latency
-            uint64_t now = get_timestamp_us();
-            uint64_t latency = now - msg->timestamp;
-            
-            if (latency_count < MAX_LATENCIES) {
-                latencies[latency_count++] = latency;
-            }
-            
-            // Update statistics
-            stats->ops++;
-            stats->bytes += msg_size;
+        if (!read_success) {
+            break;
         }
+
+        if (!validate_message(msg, msg_size)) {
+            fprintf(stderr, "Client main: Message validation failed\n");
+        }
+        
+        uint64_t now = get_timestamp_us();
+        uint64_t latency = now - msg->timestamp;
+        
+        if (latency_count < MAX_LATENCIES) {
+            latencies[latency_count++] = latency;
+        }
+        
+        stats->ops++;
+        stats->bytes += msg_size;
     }
 
-    // Cleanup
     thread_data.should_exit = true;
+    interrupt_signal(read_intr);
     interrupt_signal(write_intr);
-    pthread_join(notif_thread, NULL);
-    
+    pthread_join(client_thread, NULL);
+
     double cpu_end = get_cpu_usage();
     stats->cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);
     calculate_stats(latencies, latency_count, stats);
@@ -345,47 +406,19 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
     free(latencies);
 }
 
-void run_shm_nonblocking_server(NonBlockingRingBuffer* rb, int duration_secs, float work_secs) {
-    void* buffer = malloc(MAX_MSG_SIZE);
-    if (!buffer) {
-        perror("malloc");
-        return;
-    }
-
-    uint64_t start_time = get_timestamp_us();
-    uint64_t end_time = start_time + (duration_secs * 1000000ULL);
-    printf("Server ready to process messages\n");
-
-    while (get_timestamp_us() < end_time) {
+void free_shm_nonblocking_server(NonBlockingRingBuffer* rb) {
+    if (rb) {
         pthread_mutex_lock(&rb->mutex);
-        
-        // Wait for a message to be available
-        while (!rb->message_available) {
-            pthread_cond_wait(&rb->server_cond, &rb->mutex);
-        }
-        
-        size_t msg_size;
-        bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
-        
-        if (read_success) {
-            Message* msg = (Message*)buffer;
-            if (!validate_message(msg, msg_size)) {
-                fprintf(stderr, "Server: Message validation failed\n");
-            }
-
-            // Simulate work if requested
-            if (work_secs > 0.0f) {
-                usleep(work_secs * 1000000);
-            }
-            
-            // Echo the message back
-            if (!ring_buffer_write(rb, buffer, msg_size)) {
-                fprintf(stderr, "Failed to write response to ring buffer\n");
-            }
-        }
-        
+        rb->ready = false;
         pthread_mutex_unlock(&rb->mutex);
+        
+        munmap(rb, sizeof(NonBlockingRingBuffer) + rb->size);
+        shm_unlink(SHM_NAME);
     }
+}
 
-    free(buffer);
-} 
+void free_shm_nonblocking_client(NonBlockingRingBuffer* rb) {
+    if (rb) {
+        munmap(rb, sizeof(NonBlockingRingBuffer) + rb->size);
+    }
+}

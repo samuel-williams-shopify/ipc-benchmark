@@ -9,7 +9,6 @@
 // #define SHM_NAME "/ipc_benchmark_shm" // Removed to avoid macro redefinition warnings
 #define MAX_MSG_SIZE (128 * 1024)  // 128KiB max message size
 #define BUFFER_SIZE (4 * 1024 * 1024)  // 4MiB ring buffer
-#define WARMUP_DURATION 1  // Warmup duration in seconds
 #define RUN_DURATION 10     // Benchmark duration in seconds
 #define MAX_LATENCIES 1000000  // Maximum number of latency measurements
 

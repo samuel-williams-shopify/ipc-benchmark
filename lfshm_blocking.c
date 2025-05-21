@@ -226,7 +226,9 @@ void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs
     while (get_timestamp_us() < end_time) {
         // Read message from ring buffer
         size_t msg_size;
+        fprintf(stderr, "Server: Reading message\n");
         bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
+        fprintf(stderr, "Server: Read success success=%d size=%zu\n", read_success, msg_size);
         
         if (read_success) {
             Message* msg = (Message*)buffer;
@@ -240,6 +242,7 @@ void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs
             }
             
             // Echo the message back
+            fprintf(stderr, "Server: Writing response\n");
             if (!ring_buffer_write(rb, buffer, msg_size)) {
                 fprintf(stderr, "Failed to write response to ring buffer\n");
             }
@@ -248,7 +251,9 @@ void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs
             futex_wake((volatile uint32_t*)&rb->client_futex, 1);
         } else {
             // Wait for client to write
+            fprintf(stderr, "Server: Waiting for client to write\n");
             futex_wait((volatile uint32_t*)&rb->server_futex, atomic_load_explicit(&rb->server_futex, memory_order_acquire));
+            fprintf(stderr, "Server: Woken up by client\n");
         }
     }
     
@@ -284,6 +289,7 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
     while (get_timestamp_us() < end_time) {
         // Send message
         random_message(msg, 2048, 4096);
+        fprintf(stderr, "Client: Writing message of size %zu\n", msg->size);
         msg->timestamp = get_timestamp_us();
         if (!ring_buffer_write(rb, buffer, msg->size)) {
             fprintf(stderr, "Failed to write message to ring buffer\n");
@@ -291,17 +297,22 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
         }
         
         // Wake up server
+        fprintf(stderr, "Client: Waking up server\n");
         futex_wake((volatile uint32_t*)&rb->server_futex, 1);
 
         // Wait for response
         size_t msg_size;
+        fprintf(stderr, "Client: Waiting for response\n");
         bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
-        
+        fprintf(stderr, "Client: Read success success=%d size=%zu\n", read_success, msg_size);
+
         while (!read_success) {
             // Wait for server to write
+            fprintf(stderr, "Client: Waiting for response\n");
             futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_explicit(&rb->client_futex, memory_order_acquire));
-
+            fprintf(stderr, "Client: Woken up by server\n");
             // Retry the read
+            fprintf(stderr, "Client: Retrying read\n");
             read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
         }
 

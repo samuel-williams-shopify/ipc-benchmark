@@ -47,12 +47,12 @@ LockFreeBlockingRingBuffer* setup_lfbshm(size_t size, bool is_server) {
     }
 
     // Initialize the ring buffer
-    atomic_store_release(&rb->read_pos, 0);
-    atomic_store_release(&rb->write_pos, 0);
-    atomic_store_release(&rb->server_futex, 0);
-    atomic_store_release(&rb->client_futex, 0);
+    atomic_store(&rb->read_pos, 0);
+    atomic_store(&rb->write_pos, 0);
+    atomic_store(&rb->server_futex, 0);
+    atomic_store(&rb->client_futex, 0);
     rb->size = size;
-    atomic_store_explicit(&rb->ready, true, memory_order_release);
+    atomic_store(&rb->ready, true);
     rb->is_server = is_server;
 
     close(fd);
@@ -64,8 +64,8 @@ static bool ring_buffer_read(LockFreeBlockingRingBuffer* rb, void* data, size_t 
     *bytes_read = 0;
     
     // Check if the buffer is empty
-    uint32_t read_pos = atomic_load_acquire(&rb->read_pos);
-    uint32_t write_pos = atomic_load_acquire(&rb->write_pos);
+    size_t read_pos = atomic_load(&rb->read_pos);
+    size_t write_pos = atomic_load(&rb->write_pos);
     
     if (read_pos == write_pos) {
         return false;
@@ -110,7 +110,7 @@ static bool ring_buffer_read(LockFreeBlockingRingBuffer* rb, void* data, size_t 
     }
     
     // Update the read position atomically
-    atomic_store_release(&rb->read_pos, read_pos);
+    atomic_store(&rb->read_pos, read_pos);
     *bytes_read = msg_len;
     
     return true;
@@ -124,8 +124,8 @@ static bool ring_buffer_write(LockFreeBlockingRingBuffer* rb, const void* data, 
     }
     
     // Calculate available space
-    uint32_t read_pos = atomic_load_acquire(&rb->read_pos);
-    uint32_t write_pos = atomic_load_acquire(&rb->write_pos);
+    size_t read_pos = atomic_load(&rb->read_pos);
+    size_t write_pos = atomic_load(&rb->write_pos);
     size_t available;
     
     if (write_pos >= read_pos) {
@@ -173,7 +173,7 @@ static bool ring_buffer_write(LockFreeBlockingRingBuffer* rb, const void* data, 
     }
     
     // Update the write position atomically
-    atomic_store_release(&rb->write_pos, write_pos);
+    atomic_store(&rb->write_pos, write_pos);
     
     return true;
 }
@@ -212,7 +212,7 @@ void run_lfbshm_server(LockFreeBlockingRingBuffer* rb, int duration_secs) {
             futex_wake((volatile uint32_t*)&rb->client_futex, 1);
         } else {
             // Wait for client to write
-            futex_wait((volatile uint32_t*)&rb->server_futex, atomic_load_acquire(&rb->server_futex));
+            futex_wait((volatile uint32_t*)&rb->server_futex, atomic_load(&rb->server_futex));
         }
     }
     
@@ -282,7 +282,7 @@ void run_lfbshm_client(LockFreeBlockingRingBuffer* rb, int duration_secs, Benchm
             stats->bytes += msg_size;
         } else {
             // Wait for server to write
-            futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_acquire(&rb->client_futex));
+            futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load(&rb->client_futex));
         }
     }
 

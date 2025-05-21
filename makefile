@@ -88,15 +88,15 @@ run-all:
 ifeq ($(UNAME_S),Linux)
 	$(MAKE) run-uds-blocking && \
 	$(MAKE) run-uds-nonblocking && \
-	$(MAKE) run-shm-nonblocking && \
 	$(MAKE) run-shm-blocking && \
+	$(MAKE) run-shm-nonblocking && \
 	$(MAKE) run-lfshm-blocking && \
 	$(MAKE) run-lfshm-nonblocking
 else
 	$(MAKE) run-uds-blocking && \
 	$(MAKE) run-uds-nonblocking && \
-	$(MAKE) run-shm-nonblocking && \
-	$(MAKE) run-shm-blocking
+	$(MAKE) run-shm-blocking && \
+	$(MAKE) run-shm-nonblocking
 endif
 	@printf "\nIPC Benchmark Suite Complete\n\n"
 

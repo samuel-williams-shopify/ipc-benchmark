@@ -1,4 +1,4 @@
-#include "lfshm_nonblocking.h"
+#include "lfshm_blocking.h"
 #include "benchmark.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,10 +8,9 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
-#include <linux/futex.h>
+#include <sys/select.h>
 
-#define SHM_NAME "/lfnbshm_ring_buffer"
+#define SHM_NAME "/lfbshm_ring_buffer"
 
 // Helper functions for futex operations
 static inline int futex_wait(volatile uint32_t* uaddr, uint32_t val) {
@@ -22,11 +21,18 @@ static inline int futex_wake(volatile uint32_t* uaddr, int count) {
     return syscall(SYS_futex, uaddr, FUTEX_WAKE, count, NULL, NULL, 0);
 }
 
-/* Setup shared memory with io_uring futex operations */
-LockFreeNonBlockingRingBuffer* setup_lfshm_nonblocking(size_t size, bool is_server) {
+/* Setup lock-free shared memory */
+LockFreeBlockingRingBuffer* setup_lfshm_blocking(size_t size, bool is_server) {
     int fd = -1;
-    LockFreeNonBlockingRingBuffer* rb = NULL;
-    size_t total_size = sizeof(LockFreeNonBlockingRingBuffer) + size;
+    LockFreeBlockingRingBuffer* rb = NULL;
+    size_t total_size = sizeof(LockFreeBlockingRingBuffer) + size;
+
+    // Ensure size is power of 2 for faster modulo operations
+    size = 1ULL << (64 - __builtin_clzll(size - 1));
+    total_size = sizeof(LockFreeBlockingRingBuffer) + size;
+
+    size_t page_size = getpagesize();
+    total_size = (total_size + page_size - 1) & ~(page_size - 1);
 
     // Create and truncate shared memory
     shm_unlink(SHM_NAME); // Ensure old segment is gone
@@ -52,33 +58,32 @@ LockFreeNonBlockingRingBuffer* setup_lfshm_nonblocking(size_t size, bool is_serv
     }
 
     // Initialize the ring buffer
-    atomic_store(&rb->read_pos, 0);
-    atomic_store(&rb->write_pos, 0);
-    atomic_store(&rb->message_available, false);
-    atomic_store(&rb->response_available, false);
     rb->size = size;
-    atomic_store(&rb->ready, is_server);
-    atomic_store(&rb->server_futex, 0);
-    atomic_store(&rb->client_futex, 0);
+    atomic_store_explicit(&rb->read_pos, 0, memory_order_release);
+    atomic_store_explicit(&rb->write_pos, 0, memory_order_release);
+    atomic_store_explicit(&rb->server_futex, 0, memory_order_release);
+    atomic_store_explicit(&rb->client_futex, 0, memory_order_release);
+    atomic_store_explicit(&rb->ready, true, memory_order_release);
     rb->is_server = is_server;
 
     close(fd);
     return rb;
 }
 
-/* Read a message from the ring buffer */
-static bool ring_buffer_read(LockFreeNonBlockingRingBuffer* rb, void* data, size_t max_len, size_t* bytes_read) {
+/* Read a message from the lock-free ring buffer */
+static bool ring_buffer_read(LockFreeBlockingRingBuffer* rb, void* data, size_t max_len, size_t* bytes_read) {
     *bytes_read = 0;
     
     // Check if the buffer is empty
-    if (atomic_load(&rb->read_pos) == atomic_load(&rb->write_pos) && !atomic_load(&rb->message_available)) {
+    uint32_t read_pos = atomic_load_explicit(&rb->read_pos, memory_order_acquire);
+    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
+    
+    if (read_pos == write_pos) {
         return false;
     }
     
     // Read the message length first
     uint32_t msg_len;
-    size_t read_pos = atomic_load(&rb->read_pos);
-    
     if (read_pos + sizeof(uint32_t) > rb->size) {
         // Wrap around for the length
         size_t first_chunk = rb->size - read_pos;
@@ -115,40 +120,47 @@ static bool ring_buffer_read(LockFreeNonBlockingRingBuffer* rb, void* data, size
         }
     }
     
-    // Update the read position
-    atomic_store(&rb->read_pos, read_pos);
-    atomic_store(&rb->message_available, false);
+    // Update the read position atomically
+    atomic_store_explicit(&rb->read_pos, read_pos, memory_order_release);
     *bytes_read = msg_len;
     
     return true;
 }
 
-/* Write a message to the ring buffer */
-static bool ring_buffer_write(LockFreeNonBlockingRingBuffer* rb, const void* data, size_t len) {
+/* Write a message to the lock-free ring buffer */
+static bool ring_buffer_write(LockFreeBlockingRingBuffer* rb, const void* data, size_t len) {
     if (len > rb->size / 2) {
         // Prevent a single message from taking more than half the buffer
         return false;
     }
     
-    // Wait for space in the buffer
-    while (atomic_load(&rb->write_pos) == atomic_load(&rb->read_pos) && atomic_load(&rb->message_available)) {
-        // Spin wait
-        __builtin_ia32_pause();
+    // Calculate available space
+    uint32_t read_pos = atomic_load_explicit(&rb->read_pos, memory_order_acquire);
+    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
+    size_t available;
+    
+    if (write_pos >= read_pos) {
+        available = rb->size - (write_pos - read_pos);
+    } else {
+        available = read_pos - write_pos;
     }
     
-    // Write the message
-    size_t write_pos = atomic_load(&rb->write_pos);
+    // Check if there's enough space (reserving 1 byte to distinguish empty from full)
+    if (available <= len + sizeof(uint32_t) + 1) {
+        return false;
+    }
     
-    // Write the length first
+    // Write the message length first
+    uint32_t msg_len = len;
     if (write_pos + sizeof(uint32_t) > rb->size) {
         // Wrap around for the length
         size_t first_chunk = rb->size - write_pos;
-        memcpy(rb->buffer + write_pos, &len, first_chunk);
-        memcpy(rb->buffer, ((char*)&len) + first_chunk, sizeof(uint32_t) - first_chunk);
+        memcpy(rb->buffer + write_pos, &msg_len, first_chunk);
+        memcpy(rb->buffer, ((char*)&msg_len) + first_chunk, sizeof(uint32_t) - first_chunk);
         write_pos = sizeof(uint32_t) - first_chunk;
     } else {
         // Write the length field
-        memcpy(rb->buffer + write_pos, &len, sizeof(uint32_t));
+        memcpy(rb->buffer + write_pos, &msg_len, sizeof(uint32_t));
         write_pos += sizeof(uint32_t);
         if (write_pos == rb->size) {
             write_pos = 0;
@@ -171,25 +183,17 @@ static bool ring_buffer_write(LockFreeNonBlockingRingBuffer* rb, const void* dat
         }
     }
     
-    // Update the write position
-    atomic_store(&rb->write_pos, write_pos);
-    atomic_store(&rb->message_available, true);
+    // Update the write position atomically
+    atomic_store_explicit(&rb->write_pos, write_pos, memory_order_release);
     
     return true;
 }
 
-/* Run the Lock-free io_uring Shared Memory server benchmark */
-void run_lfshm_nonblocking_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs) {
+/* Run the Lock-free Shared Memory server benchmark */
+void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
-        return;
-    }
-
-    struct io_uring ring;
-    if (io_uring_queue_init(32, &ring, 0) < 0) {
-        perror("io_uring_queue_init");
-        free(buffer);
         return;
     }
 
@@ -200,24 +204,6 @@ void run_lfshm_nonblocking_server(LockFreeNonBlockingRingBuffer* rb, int duratio
     printf("Server ready to process messages\n");
     
     while (get_timestamp_us() < end_time) {
-        // Wait for message using io_uring futex
-        struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-        uint32_t message_available = atomic_load(&rb->message_available);
-        io_uring_prep_futex_wait(sqe, (uint32_t*)&rb->message_available, message_available, 0, 0, FUTEX_PRIVATE_FLAG);
-        
-        struct io_uring_cqe* cqe;
-        if (io_uring_submit_and_wait(&ring, 1) < 0) {
-            perror("io_uring_submit_and_wait");
-            continue;
-        }
-        
-        if (io_uring_wait_cqe(&ring, &cqe) < 0) {
-            perror("io_uring_wait_cqe");
-            continue;
-        }
-        
-        io_uring_cqe_seen(&ring, cqe);
-        
         // Read message from ring buffer
         size_t msg_size;
         bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
@@ -233,50 +219,42 @@ void run_lfshm_nonblocking_server(LockFreeNonBlockingRingBuffer* rb, int duratio
                 fprintf(stderr, "Failed to write response to ring buffer\n");
             }
             
-            // Wake client using io_uring futex
-            sqe = io_uring_get_sqe(&ring);
-            uint32_t response_available = atomic_load(&rb->response_available);
-            io_uring_prep_futex_wake(sqe, (uint32_t*)&rb->response_available, response_available, 1, 0, FUTEX_PRIVATE_FLAG);
-            io_uring_submit(&ring);
+            // Wake up client if it's waiting
+            futex_wake((volatile uint32_t*)&rb->client_futex, 1);
+        } else {
+            // Wait for client to write
+            futex_wait((volatile uint32_t*)&rb->server_futex, atomic_load_explicit(&rb->server_futex, memory_order_acquire));
         }
     }
     
-    io_uring_queue_exit(&ring);
+    // Cleanup
     free(buffer);
-    munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + BUFFER_SIZE);
+    munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
     shm_unlink(SHM_NAME);
 }
 
-/* Run the Lock-free io_uring Shared Memory client benchmark */
-void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
+/* Run the Lock-free Shared Memory client benchmark */
+void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
-        munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + BUFFER_SIZE);
+        munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
         return;
     }
     uint64_t* latencies = malloc(sizeof(uint64_t) * MAX_LATENCIES);
     if (!latencies) {
         perror("malloc");
         free(buffer);
-        munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + BUFFER_SIZE);
+        munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
         return;
     }
     size_t latency_count = 0;
     double cpu_start = get_cpu_usage();
 
-    struct io_uring ring;
-    if (io_uring_queue_init(32, &ring, 0) < 0) {
-        perror("io_uring_queue_init");
-        free(buffer);
-        free(latencies);
-        munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + BUFFER_SIZE);
-        return;
-    }
-
     Message* msg = (Message*)buffer;
+    msg->seq = 0;
 
-    // Benchmark phase
+    // Start the benchmark
     stats->ops = 0;
     stats->bytes = 0;
     uint64_t start_time = get_timestamp_us();
@@ -299,13 +277,14 @@ void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duratio
         bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
         
         if (read_success) {
-            if (!validate_message(msg, msg_size)) {
+            Message* response = (Message*)buffer;
+            if (!validate_message(response, msg_size)) {
                 fprintf(stderr, "Client: Message validation failed\n");
             }
-
+            
             // Calculate latency
             uint64_t now = get_timestamp_us();
-            uint64_t latency = now - msg->timestamp;
+            uint64_t latency = now - response->timestamp;
             
             if (latency_count < MAX_LATENCIES) {
                 latencies[latency_count++] = latency;
@@ -316,7 +295,7 @@ void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duratio
             stats->bytes += msg_size;
         } else {
             // Wait for server to write
-            futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load(&rb->client_futex));
+            futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_explicit(&rb->client_futex, memory_order_acquire));
         }
     }
 
@@ -324,14 +303,13 @@ void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duratio
     stats->cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);
     calculate_stats(latencies, latency_count, stats);
     
-    io_uring_queue_exit(&ring);
     free(buffer);
     free(latencies);
-    munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + BUFFER_SIZE);
+    munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
 }
 
-void free_lfshm_nonblocking(LockFreeNonBlockingRingBuffer* rb) {
-    munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + rb->size);
+void free_lfshm_blocking(LockFreeBlockingRingBuffer* rb) {
+    munmap(rb, sizeof(LockFreeBlockingRingBuffer) + rb->size);
     if (rb->is_server) {
         shm_unlink(SHM_NAME);
     }

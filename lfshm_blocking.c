@@ -58,12 +58,12 @@ LockFreeBlockingRingBuffer* setup_lfshm_blocking(size_t size, bool is_server) {
     }
 
     // Initialize the ring buffer
-    atomic_store(&rb->read_pos, 0);
-    atomic_store(&rb->write_pos, 0);
-    atomic_store(&rb->server_futex, 0);
-    atomic_store(&rb->client_futex, 0);
     rb->size = size;
-    atomic_store(&rb->ready, true);
+    atomic_store_explicit(&rb->read_pos, 0, memory_order_release);
+    atomic_store_explicit(&rb->write_pos, 0, memory_order_release);
+    atomic_store_explicit(&rb->server_futex, 0, memory_order_release);
+    atomic_store_explicit(&rb->client_futex, 0, memory_order_release);
+    atomic_store_explicit(&rb->ready, true, memory_order_release);
     rb->is_server = is_server;
 
     close(fd);
@@ -75,8 +75,8 @@ static bool ring_buffer_read(LockFreeBlockingRingBuffer* rb, void* data, size_t 
     *bytes_read = 0;
     
     // Check if the buffer is empty
-    size_t read_pos = atomic_load(&rb->read_pos);
-    size_t write_pos = atomic_load(&rb->write_pos);
+    uint32_t read_pos = atomic_load_explicit(&rb->read_pos, memory_order_acquire);
+    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
     
     if (read_pos == write_pos) {
         return false;
@@ -121,7 +121,7 @@ static bool ring_buffer_read(LockFreeBlockingRingBuffer* rb, void* data, size_t 
     }
     
     // Update the read position atomically
-    atomic_store(&rb->read_pos, read_pos);
+    atomic_store_explicit(&rb->read_pos, read_pos, memory_order_release);
     *bytes_read = msg_len;
     
     return true;
@@ -135,8 +135,8 @@ static bool ring_buffer_write(LockFreeBlockingRingBuffer* rb, const void* data, 
     }
     
     // Calculate available space
-    size_t read_pos = atomic_load(&rb->read_pos);
-    size_t write_pos = atomic_load(&rb->write_pos);
+    uint32_t read_pos = atomic_load_explicit(&rb->read_pos, memory_order_acquire);
+    uint32_t write_pos = atomic_load_explicit(&rb->write_pos, memory_order_acquire);
     size_t available;
     
     if (write_pos >= read_pos) {
@@ -184,7 +184,7 @@ static bool ring_buffer_write(LockFreeBlockingRingBuffer* rb, const void* data, 
     }
     
     // Update the write position atomically
-    atomic_store(&rb->write_pos, write_pos);
+    atomic_store_explicit(&rb->write_pos, write_pos, memory_order_release);
     
     return true;
 }
@@ -223,7 +223,7 @@ void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs
             futex_wake((volatile uint32_t*)&rb->client_futex, 1);
         } else {
             // Wait for client to write
-            futex_wait((volatile uint32_t*)&rb->server_futex, atomic_load(&rb->server_futex));
+            futex_wait((volatile uint32_t*)&rb->server_futex, atomic_load_explicit(&rb->server_futex, memory_order_acquire));
         }
     }
     
@@ -252,8 +252,9 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
     double cpu_start = get_cpu_usage();
 
     Message* msg = (Message*)buffer;
+    msg->seq = 0;
 
-    // Benchmark phase
+    // Start the benchmark
     stats->ops = 0;
     stats->bytes = 0;
     uint64_t start_time = get_timestamp_us();
@@ -276,13 +277,14 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
         bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
         
         if (read_success) {
-            if (!validate_message(msg, msg_size)) {
+            Message* response = (Message*)buffer;
+            if (!validate_message(response, msg_size)) {
                 fprintf(stderr, "Client: Message validation failed\n");
             }
-
+            
             // Calculate latency
             uint64_t now = get_timestamp_us();
-            uint64_t latency = now - msg->timestamp;
+            uint64_t latency = now - response->timestamp;
             
             if (latency_count < MAX_LATENCIES) {
                 latencies[latency_count++] = latency;
@@ -293,7 +295,7 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
             stats->bytes += msg_size;
         } else {
             // Wait for server to write
-            futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load(&rb->client_futex));
+            futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_explicit(&rb->client_futex, memory_order_acquire));
         }
     }
 

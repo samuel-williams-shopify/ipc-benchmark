@@ -9,19 +9,22 @@
 #include <liburing.h>
 #include "benchmark.h"
 
-// Structure for lock-free non-blocking shared memory ring buffer
-typedef struct {
-    char* buffer;
-    size_t size;
-    atomic_size_t read_pos;
-    atomic_size_t write_pos;
-    atomic_bool message_available;
-    atomic_bool response_available;
+struct {
+    // Server-side fields (aligned to cache line)
+    atomic_uint write_pos;
     atomic_uint server_futex;
+    char _pad1[CACHE_LINE_SIZE - sizeof(atomic_uint) * 2];
+    
+    // Client-side fields (aligned to cache line)
+    atomic_uint read_pos;
     atomic_uint client_futex;
+    char _pad2[CACHE_LINE_SIZE - sizeof(atomic_uint) * 2];
+    
+    // Shared fields
+    size_t size;
     atomic_bool ready;
-    bool is_server;
-} LockFreeNonBlockingRingBuffer;
+    char buffer[0];
+} __attribute__((aligned(CACHE_LINE_SIZE))) LockFreeNonBlockingRingBuffer;
 
 // Function prototypes
 LockFreeNonBlockingRingBuffer* setup_lfshm_nonblocking(size_t size, bool is_server);

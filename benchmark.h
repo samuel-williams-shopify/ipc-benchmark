@@ -16,6 +16,8 @@
 #define MAGIC_START 0xDEADBEEF
 #define MAGIC_END   0xCAFEBABE
 
+#define CACHE_LINE_SIZE 64
+
 /* Statistics structure */
 typedef struct {
     uint64_t ops;            // Operations completed

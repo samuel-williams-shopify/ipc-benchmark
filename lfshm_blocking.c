@@ -37,36 +37,54 @@ LockFreeBlockingRingBuffer* setup_lfshm_blocking(size_t size, bool is_server) {
     // Create and truncate shared memory
     if (is_server) {
         shm_unlink(SHM_NAME); // Ensure old segment is gone
-    }
+        fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
+        if (fd == -1) {
+            perror("shm_open");
+            return NULL;
+        }
 
-    fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
-    if (fd == -1) {
-        perror("shm_open");
-        return NULL;
-    }
+        if (ftruncate(fd, total_size) == -1) {
+            perror("ftruncate");
+            close(fd);
+            shm_unlink(SHM_NAME);
+            return NULL;
+        }
 
-    if (ftruncate(fd, total_size) == -1) {
-        perror("ftruncate");
-        close(fd);
-        shm_unlink(SHM_NAME);
-        return NULL;
-    }
+        rb = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (rb == MAP_FAILED) {
+            perror("mmap");
+            close(fd);
+            shm_unlink(SHM_NAME);
+            return NULL;
+        }
 
-    rb = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (rb == MAP_FAILED) {
-        perror("mmap");
-        close(fd);
-        shm_unlink(SHM_NAME);
-        return NULL;
-    }
+        // Initialize the ring buffer
+        rb->size = size;
+        atomic_store_explicit(&rb->read_pos, 0, memory_order_release);
+        atomic_store_explicit(&rb->write_pos, 0, memory_order_release);
+        atomic_store_explicit(&rb->server_futex, 0, memory_order_release);
+        atomic_store_explicit(&rb->client_futex, 0, memory_order_release);
+        atomic_store_explicit(&rb->ready, true, memory_order_release);
+    } else {
+        // Client just opens the existing segment
+        fd = shm_open(SHM_NAME, O_RDWR, 0666);
+        if (fd == -1) {
+            perror("shm_open");
+            return NULL;
+        }
 
-    // Initialize the ring buffer
-    rb->size = size;
-    atomic_store_explicit(&rb->read_pos, 0, memory_order_release);
-    atomic_store_explicit(&rb->write_pos, 0, memory_order_release);
-    atomic_store_explicit(&rb->server_futex, 0, memory_order_release);
-    atomic_store_explicit(&rb->client_futex, 0, memory_order_release);
-    atomic_store_explicit(&rb->ready, true, memory_order_release);
+        rb = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (rb == MAP_FAILED) {
+            perror("mmap");
+            close(fd);
+            return NULL;
+        }
+
+        // Wait for server to initialize
+        while (!atomic_load_explicit(&rb->ready, memory_order_acquire)) {
+            usleep(1000); // Sleep for 1ms
+        }
+    }
 
     close(fd);
     return rb;

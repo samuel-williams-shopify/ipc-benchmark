@@ -20,9 +20,9 @@ typedef struct {
 } LockFreeBlockingRingBuffer;
 
 // Function prototypes
-LockFreeBlockingRingBuffer* setup_lfbshm(size_t size, bool is_server);
-void free_lfbshm(LockFreeBlockingRingBuffer* rb);
-void run_lfbshm_server(LockFreeBlockingRingBuffer* rb, int duration_secs);
-void run_lfbshm_client(LockFreeBlockingRingBuffer* rb, int duration_secs, void* stats);
+LockFreeBlockingRingBuffer* setup_lfshm_blocking(size_t size, bool is_server);
+void free_lfshm_blocking(LockFreeBlockingRingBuffer* rb);
+void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs);
+void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs, void* stats);
 
 #endif // LFSHM_BLOCKING_H 

@@ -23,7 +23,7 @@ static inline int futex_wake(volatile uint32_t* uaddr, int count) {
 }
 
 /* Setup shared memory with io_uring futex operations */
-LockFreeNonBlockingRingBuffer* setup_lfnbshm(size_t size, bool is_server) {
+LockFreeNonBlockingRingBuffer* setup_lfshm_nonblocking(size_t size, bool is_server) {
     int fd = -1;
     LockFreeNonBlockingRingBuffer* rb = NULL;
     size_t total_size = sizeof(LockFreeNonBlockingRingBuffer) + size;
@@ -179,7 +179,7 @@ static bool ring_buffer_write(LockFreeNonBlockingRingBuffer* rb, const void* dat
 }
 
 /* Run the Lock-free io_uring Shared Memory server benchmark */
-void run_lfnbshm_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs) {
+void run_lfshm_nonblocking_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
@@ -248,7 +248,7 @@ void run_lfnbshm_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs) {
 }
 
 /* Run the Lock-free io_uring Shared Memory client benchmark */
-void run_lfnbshm_client(LockFreeNonBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
+void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
@@ -330,7 +330,7 @@ void run_lfnbshm_client(LockFreeNonBlockingRingBuffer* rb, int duration_secs, Be
     munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + BUFFER_SIZE);
 }
 
-void free_lfnbshm(LockFreeNonBlockingRingBuffer* rb) {
+void free_lfshm_nonblocking(LockFreeNonBlockingRingBuffer* rb) {
     munmap(rb, sizeof(LockFreeNonBlockingRingBuffer) + rb->size);
     if (rb->is_server) {
         shm_unlink(SHM_NAME);

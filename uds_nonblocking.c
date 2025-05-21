@@ -25,8 +25,10 @@ static ssize_t read_nonblocking(int fd, void* buf, size_t n) {
                     .events = POLLIN,
                     .revents = 0
                 };
-                if (poll(&pfd, 1, 1000) <= 0) continue;
-                if (!(pfd.revents & POLLIN)) continue;
+                if (poll(&pfd, 1, -1) < 0) {
+                    perror("poll");
+                    return -1;
+                }
                 continue;
             }
             return -1;
@@ -51,8 +53,10 @@ static ssize_t write_nonblocking(int fd, const void* buf, size_t n) {
                     .events = POLLOUT,
                     .revents = 0
                 };
-                if (poll(&pfd, 1, 1000) <= 0) continue;
-                if (!(pfd.revents & POLLOUT)) continue;
+                if (poll(&pfd, 1, -1) < 0) {
+                    perror("poll");
+                    return -1;
+                }
                 continue;
             }
             return -1;
@@ -256,30 +260,43 @@ void run_uds_nonblocking_client(UDSNonblockingState* state, int duration_secs, B
         // Send message
         random_message(msg, 2048, 4096);
         msg->timestamp = get_timestamp_us();
-        if (write_nonblocking(state->fd, buffer, msg->size) != msg->size) {
-            fprintf(stderr, "Failed to write message\n");
-            continue;
+        ssize_t sent = write_nonblocking(state->fd, buffer, msg->size);
+        if (sent != msg->size) {
+            if (sent < 0 && (errno == EPIPE || errno == ECONNRESET)) {
+                fprintf(stderr, "Connection closed by server (warmup)\n");
+                break;
+            }
+            perror("write_nonblocking");
+            break;
         }
 
         // Read header
         ssize_t header_bytes = read_nonblocking(state->fd, buffer, sizeof(Message));
         if (header_bytes <= 0) {
+            if (header_bytes < 0 && (errno == EPIPE || errno == ECONNRESET)) {
+                fprintf(stderr, "Connection closed by server (warmup)\n");
+                break;
+            }
             fprintf(stderr, "Failed to read message header\n");
-            continue;
+            break;
         }
 
         Message* response = (Message*)buffer;
         size_t msg_size = response->size;
         if (msg_size < sizeof(Message) + sizeof(uint32_t) || msg_size > MAX_MSG_SIZE) {
             fprintf(stderr, "Client: Invalid message size %zu\n", msg_size);
-            continue;
+            break;
         }
 
         // Read body
         ssize_t body_bytes = read_nonblocking(state->fd, (char*)buffer + sizeof(Message), msg_size - sizeof(Message));
         if (body_bytes < 0) {
+            if (errno == EPIPE || errno == ECONNRESET) {
+                fprintf(stderr, "Connection closed by server (warmup)\n");
+                break;
+            }
             fprintf(stderr, "Failed to read message body\n");
-            continue;
+            break;
         }
 
         if (!validate_message(response, msg_size)) {
@@ -298,30 +315,43 @@ void run_uds_nonblocking_client(UDSNonblockingState* state, int duration_secs, B
         // Send message
         random_message(msg, 2048, 4096);
         msg->timestamp = get_timestamp_us();
-        if (write_nonblocking(state->fd, buffer, msg->size) != msg->size) {
-            fprintf(stderr, "Failed to write message\n");
-            continue;
+        ssize_t sent = write_nonblocking(state->fd, buffer, msg->size);
+        if (sent != msg->size) {
+            if (sent < 0 && (errno == EPIPE || errno == ECONNRESET)) {
+                fprintf(stderr, "Connection closed by server (benchmark)\n");
+                break;
+            }
+            perror("write_nonblocking");
+            break;
         }
 
         // Read header
         ssize_t header_bytes = read_nonblocking(state->fd, buffer, sizeof(Message));
         if (header_bytes <= 0) {
+            if (header_bytes < 0 && (errno == EPIPE || errno == ECONNRESET)) {
+                fprintf(stderr, "Connection closed by server (benchmark)\n");
+                break;
+            }
             fprintf(stderr, "Failed to read message header\n");
-            continue;
+            break;
         }
 
         Message* response = (Message*)buffer;
         size_t msg_size = response->size;
         if (msg_size < sizeof(Message) + sizeof(uint32_t) || msg_size > MAX_MSG_SIZE) {
             fprintf(stderr, "Client: Invalid message size %zu\n", msg_size);
-            continue;
+            break;
         }
 
         // Read body
         ssize_t body_bytes = read_nonblocking(state->fd, (char*)buffer + sizeof(Message), msg_size - sizeof(Message));
         if (body_bytes < 0) {
+            if (errno == EPIPE || errno == ECONNRESET) {
+                fprintf(stderr, "Connection closed by server (benchmark)\n");
+                break;
+            }
             fprintf(stderr, "Failed to read message body\n");
-            continue;
+            break;
         }
 
         if (!validate_message(response, msg_size)) {

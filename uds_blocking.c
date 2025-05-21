@@ -131,15 +131,11 @@ void run_uds_blocking_server(UDSBlockingState* state, int duration_secs) {
         if (body_bytes < 0) break;
         if (!validate_message(msg, msg_size)) {
             fprintf(stderr, "Server: Message validation failed\n");
-            continue;
         }
-        if (send(client_fd, buffer, msg_size, 0) != msg_size) {
+        if (send(client_fd, buffer, msg_size, 0) != (ssize_t)msg_size) {
             perror("send");
             break;
         }
-    }
-    if (get_timestamp_us() >= end_time - 100000) {
-        printf("Server shutting down...\n");
     }
     close(client_fd);
     free(buffer);
@@ -161,84 +157,103 @@ void run_uds_blocking_client(UDSBlockingState* state, int duration_secs, Benchma
     size_t latency_count = 0;
     double cpu_start = get_cpu_usage();
     Message* msg = (Message*)buffer;
-    msg->seq = 0;
     uint64_t start_warmup = get_timestamp_us();
     uint64_t end_warmup = start_warmup + (WARMUP_DURATION * 1000000ULL);
-    random_message(msg, 2048, 4096);
-    if (send(state->fd, buffer, msg->size, 0) != msg->size) {
-        perror("send");
-        goto cleanup;
-    }
+
+    // Warmup phase
     while (get_timestamp_us() < end_warmup) {
+        // Send message
+        random_message(msg, 2048, 4096);
+        msg->timestamp = get_timestamp_us();
+        if (send(state->fd, buffer, msg->size, 0) != msg->size) {
+            perror("send");
+            continue;
+        }
+
         // Read header
         ssize_t header_bytes = recv(state->fd, buffer, sizeof(Message), 0);
-        if (header_bytes <= 0) break;
+        if (header_bytes <= 0) {
+            fprintf(stderr, "Failed to read message header\n");
+            continue;
+        }
+
         Message* response = (Message*)buffer;
         size_t msg_size = response->size;
         if (msg_size < sizeof(Message) + sizeof(uint32_t) || msg_size > MAX_MSG_SIZE) {
             fprintf(stderr, "Client: Invalid message size %zu\n", msg_size);
-            break;
-        }
-        ssize_t body_bytes = recv(state->fd, (char*)buffer + sizeof(Message), msg_size - sizeof(Message), 0);
-        if (body_bytes < 0) break;
-        if (!validate_message(response, msg_size)) {
-            fprintf(stderr, "Client: Message validation failed\n");
             continue;
         }
-        random_message(msg, 2048, 4096);
-        if (send(state->fd, buffer, msg->size, 0) != msg->size) {
-            perror("send");
-            break;
+
+        // Read body
+        ssize_t body_bytes = recv(state->fd, (char*)buffer + sizeof(Message), msg_size - sizeof(Message), 0);
+        if (body_bytes < 0) {
+            fprintf(stderr, "Failed to read message body\n");
+            continue;
+        }
+
+        if (!validate_message(response, msg_size)) {
+            fprintf(stderr, "Client: Message validation failed\n");
         }
     }
+
     printf("Warmup completed, starting benchmark...\n");
     stats->ops = 0;
     stats->bytes = 0;
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
-    random_message(msg, 2048, 4096);
-    msg->timestamp = get_timestamp_us();
-    if (send(state->fd, buffer, msg->size, 0) != msg->size) {
-        perror("send");
-        goto cleanup;
-    }
+
+    // Benchmark phase
     while (get_timestamp_us() < end_time) {
-        ssize_t header_bytes = recv(state->fd, buffer, sizeof(Message), 0);
-        if (header_bytes <= 0) break;
-        Message* response = (Message*)buffer;
-        size_t msg_size = response->size;
-        if (msg_size < sizeof(Message) + sizeof(uint32_t) || msg_size > MAX_MSG_SIZE) {
-            fprintf(stderr, "Client: Invalid message size %zu\n", msg_size);
-            break;
-        }
-        ssize_t body_bytes = recv(state->fd, (char*)buffer + sizeof(Message), msg_size - sizeof(Message), 0);
-        if (body_bytes < 0) break;
-        if (!validate_message(response, msg_size)) {
-            fprintf(stderr, "Client: Message validation failed\n");
-            continue;
-        }
-        uint64_t now = get_timestamp_us();
-        uint64_t latency = now - response->timestamp;
-        if (latency_count < MAX_LATENCIES) {
-            latencies[latency_count++] = latency;
-        }
-        stats->ops++;
-        stats->bytes += msg_size;
+        // Send message
         random_message(msg, 2048, 4096);
         msg->timestamp = get_timestamp_us();
         if (send(state->fd, buffer, msg->size, 0) != msg->size) {
             perror("send");
-            break;
+            continue;
         }
+
+        // Read header
+        ssize_t header_bytes = recv(state->fd, buffer, sizeof(Message), 0);
+        if (header_bytes <= 0) {
+            fprintf(stderr, "Failed to read message header\n");
+            continue;
+        }
+
+        Message* response = (Message*)buffer;
+        size_t msg_size = response->size;
+        if (msg_size < sizeof(Message) + sizeof(uint32_t) || msg_size > MAX_MSG_SIZE) {
+            fprintf(stderr, "Client: Invalid message size %zu\n", msg_size);
+            continue;
+        }
+
+        // Read body
+        ssize_t body_bytes = recv(state->fd, (char*)buffer + sizeof(Message), msg_size - sizeof(Message), 0);
+        if (body_bytes < 0) {
+            fprintf(stderr, "Failed to read message body\n");
+            continue;
+        }
+
+        if (!validate_message(response, msg_size)) {
+            fprintf(stderr, "Client: Message validation failed\n");
+        }
+
+        // Calculate latency
+        uint64_t now = get_timestamp_us();
+        uint64_t latency = now - msg->timestamp;
+        
+        if (latency_count < MAX_LATENCIES) {
+            latencies[latency_count++] = latency;
+        }
+        
+        // Update statistics
+        stats->ops++;
+        stats->bytes += msg_size;
     }
-    if (get_timestamp_us() >= end_time - 100000) {
-        printf("\nBenchmark completed successfully.\n");
-    }
-    double cpu_end;
-cleanup:
-    cpu_end = get_cpu_usage();
+
+    double cpu_end = get_cpu_usage();
     stats->cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);
     calculate_stats(latencies, latency_count, stats);
+    
     free(buffer);
     free(latencies);
 } 

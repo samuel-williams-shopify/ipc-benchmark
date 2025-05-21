@@ -201,7 +201,6 @@ void run_lfbshm_server(LockFreeBlockingRingBuffer* rb, int duration_secs) {
             Message* msg = (Message*)buffer;
             if (!validate_message(msg, msg_size)) {
                 fprintf(stderr, "Server: Message validation failed\n");
-                continue;
             }
             
             // Echo the message back
@@ -215,10 +214,6 @@ void run_lfbshm_server(LockFreeBlockingRingBuffer* rb, int duration_secs) {
             // Wait for client to write
             futex_wait((volatile uint32_t*)&rb->server_futex, atomic_load_acquire(&rb->server_futex));
         }
-    }
-    
-    if (get_timestamp_us() >= end_time - 100000) { // Within 100ms of end
-        printf("Server shutting down...\n");
     }
     
     // Cleanup
@@ -245,100 +240,68 @@ void run_lfbshm_client(LockFreeBlockingRingBuffer* rb, int duration_secs, Benchm
     size_t latency_count = 0;
     double cpu_start = get_cpu_usage();
 
-    // Initialize the message
     Message* msg = (Message*)buffer;
-    msg->seq = 0;
-    
-    // Start warmup
     uint64_t start_warmup = get_timestamp_us();
     uint64_t end_warmup = start_warmup + (WARMUP_DURATION * 1000000ULL);
 
-    // Send the first message (warmup)
-    random_message(msg, 2048, 4096);
-    if (!ring_buffer_write(rb, buffer, msg->size)) {
-        fprintf(stderr, "Failed to write message to ring buffer\n");
-        goto cleanup;
-    }
-    
-    // Wake up server
-    futex_wake((volatile uint32_t*)&rb->server_futex, 1);
-
     // Warmup phase
     while (get_timestamp_us() < end_warmup) {
-        // Read response from ring buffer
+        // Send message
+        random_message(msg, 2048, 4096);
+        msg->timestamp = get_timestamp_us();
+        if (!ring_buffer_write(rb, buffer, msg->size)) {
+            fprintf(stderr, "Failed to write message to ring buffer\n");
+            continue;
+        }
+        
+        // Wake up server
+        futex_wake((volatile uint32_t*)&rb->server_futex, 1);
+
+        // Wait for response
         size_t msg_size;
         bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
         
         if (read_success) {
-            Message* response = (Message*)buffer;
-            if (!validate_message(response, msg_size)) {
+            if (!validate_message(msg, msg_size)) {
                 fprintf(stderr, "Client: Message validation failed\n");
-                continue;
             }
-            
-            // Calculate latency
-            uint64_t now = get_timestamp_us();
-            uint64_t latency = now - response->timestamp;
-            
-            if (latency_count < MAX_LATENCIES) {
-                latencies[latency_count++] = latency;
-            }
-            
-            // Update statistics
-            stats->ops++;
-            stats->bytes += msg_size;
-            
-            // Send the next message
-            random_message(msg, 2048, 4096);
-            msg->timestamp = get_timestamp_us();
-            if (!ring_buffer_write(rb, buffer, msg->size)) {
-                fprintf(stderr, "Failed to write message to ring buffer\n");
-            }
-            
-            // Wake up server
-            futex_wake((volatile uint32_t*)&rb->server_futex, 1);
         } else {
             // Wait for server to write
             futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_acquire(&rb->client_futex));
         }
     }
-    
+
     printf("Warmup completed, starting benchmark...\n");
-    
-    // Reset statistics for benchmark phase
     stats->ops = 0;
     stats->bytes = 0;
-    
-    // Start the benchmark
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
-    
-    // Send the first message (benchmark)
-    random_message(msg, 2048, 4096);
-    msg->timestamp = get_timestamp_us();
-    if (!ring_buffer_write(rb, buffer, msg->size)) {
-        fprintf(stderr, "Failed to write message to ring buffer\n");
-        goto cleanup;
-    }
-    
-    // Wake up server
-    futex_wake((volatile uint32_t*)&rb->server_futex, 1);
 
+    // Benchmark phase
     while (get_timestamp_us() < end_time) {
-        // Read response from ring buffer
+        // Send message
+        random_message(msg, 2048, 4096);
+        msg->timestamp = get_timestamp_us();
+        if (!ring_buffer_write(rb, buffer, msg->size)) {
+            fprintf(stderr, "Failed to write message to ring buffer\n");
+            continue;
+        }
+        
+        // Wake up server
+        futex_wake((volatile uint32_t*)&rb->server_futex, 1);
+
+        // Wait for response
         size_t msg_size;
         bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
         
         if (read_success) {
-            Message* response = (Message*)buffer;
-            if (!validate_message(response, msg_size)) {
+            if (!validate_message(msg, msg_size)) {
                 fprintf(stderr, "Client: Message validation failed\n");
-                continue;
             }
-            
+
             // Calculate latency
             uint64_t now = get_timestamp_us();
-            uint64_t latency = now - response->timestamp;
+            uint64_t latency = now - msg->timestamp;
             
             if (latency_count < MAX_LATENCIES) {
                 latencies[latency_count++] = latency;
@@ -347,36 +310,16 @@ void run_lfbshm_client(LockFreeBlockingRingBuffer* rb, int duration_secs, Benchm
             // Update statistics
             stats->ops++;
             stats->bytes += msg_size;
-            
-            // Send the next message
-            random_message(msg, 2048, 4096);
-            msg->timestamp = get_timestamp_us();
-            if (!ring_buffer_write(rb, buffer, msg->size)) {
-                fprintf(stderr, "Failed to write message to ring buffer\n");
-            }
-            
-            // Wake up server
-            futex_wake((volatile uint32_t*)&rb->server_futex, 1);
         } else {
             // Wait for server to write
             futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_acquire(&rb->client_futex));
         }
     }
-    
-    if (get_timestamp_us() >= end_time - 100000) { // Within 100ms of end
-        printf("\nBenchmark completed successfully.\n");
-    }
 
-    double cpu_end;
-cleanup:    
-    // Record CPU usage
-    cpu_end = get_cpu_usage();
+    double cpu_end = get_cpu_usage();
     stats->cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);
-
-    // Calculate final statistics
     calculate_stats(latencies, latency_count, stats);
     
-    // Cleanup resources
     free(buffer);
     free(latencies);
     munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);

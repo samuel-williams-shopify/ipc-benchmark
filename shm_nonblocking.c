@@ -56,6 +56,8 @@ static bool ring_buffer_read(NonBlockingRingBuffer* rb, void* data, size_t max_l
             read_pos = 0;
         }
     }
+
+    // fprintf(stderr, "Reading message len=%zu\n", msg_len);
     
     // Check if message fits in the provided buffer
     if (msg_len > max_len) {
@@ -88,12 +90,12 @@ static bool ring_buffer_read(NonBlockingRingBuffer* rb, void* data, size_t max_l
 
 /* Write a message to the ring buffer */
 static bool ring_buffer_write(NonBlockingRingBuffer* rb, const void* data, size_t len) {
+    // fprintf(stderr, "Writing message to ring buffer len=%zu\n", len);
+
     if (len > rb->size / 2) {
         // Prevent a single message from taking more than half the buffer
         return false;
     }
-    
-    pthread_mutex_lock(&rb->mutex);
     
     // Wait for space in the buffer
     while (rb->write_pos == rb->read_pos && rb->message_available) {
@@ -140,7 +142,6 @@ static bool ring_buffer_write(NonBlockingRingBuffer* rb, const void* data, size_
     rb->message_available = true;
     pthread_cond_signal(&rb->server_cond);
     
-    pthread_mutex_unlock(&rb->mutex);
     return true;
 }
 
@@ -155,10 +156,16 @@ static void* notification_thread(void* arg) {
     while (!data->should_exit) {
         interrupt_wait(data->write_intr);
         
-        ring_buffer_write(rb, data->msg, data->msg->size);
-        
         pthread_mutex_lock(&rb->mutex);
-
+        
+        // Write the message
+        if (!ring_buffer_write(rb, data->msg, data->msg->size)) {
+            fprintf(stderr, "Failed to write message to ring buffer\n");
+            pthread_mutex_unlock(&rb->mutex);
+            continue;
+        }
+        
+        // Wait for response
         while (!rb->message_available) {
             pthread_cond_wait(&rb->server_cond, &rb->mutex);
         }
@@ -291,12 +298,12 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
     uint64_t start_warmup = get_timestamp_us();
     uint64_t end_warmup = start_warmup + (WARMUP_DURATION * 1000000ULL);
     
-    // Send first message
-    random_message(msg, 2048, 4096);
-    msg->timestamp = get_timestamp_us();
-    interrupt_signal(write_intr);
-
     while (get_timestamp_us() < end_warmup) {
+        // Send message
+        random_message(msg, 2048, 4096);
+        msg->timestamp = get_timestamp_us();
+        interrupt_signal(write_intr);
+
         // Wait for response
         if (interrupt_wait(read_intr) == -1) {
             perror("interrupt_wait");
@@ -306,13 +313,7 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
         if (read_success) {
             if (!validate_message(msg, msg_size)) {
                 fprintf(stderr, "Client: Message validation failed\n");
-                continue;
             }
-            
-            // Send next message
-            random_message(msg, 2048, 4096);
-            msg->timestamp = get_timestamp_us();
-            interrupt_signal(write_intr);
         }
     }
 
@@ -321,13 +322,13 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
     stats->bytes = 0;
     uint64_t start_time = get_timestamp_us();
     uint64_t end_time = start_time + (duration_secs * 1000000ULL);
-    
-    // Send first message
-    random_message(msg, 2048, 4096);
-    msg->timestamp = get_timestamp_us();
-    interrupt_signal(write_intr);
 
     while (get_timestamp_us() < end_time) {
+        // Send message
+        random_message(msg, 2048, 4096);
+        msg->timestamp = get_timestamp_us();
+        interrupt_signal(write_intr);
+
         // Wait for response
         if (interrupt_wait(read_intr) == -1) {
             perror("interrupt_wait");
@@ -337,7 +338,6 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
         if (read_success) {
             if (!validate_message(msg, msg_size)) {
                 fprintf(stderr, "Client: Message validation failed\n");
-                continue;
             }
             
             // Calculate latency
@@ -351,19 +351,9 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
             // Update statistics
             stats->ops++;
             stats->bytes += msg_size;
-            
-            // Send next message
-            random_message(msg, 2048, 4096);
-            msg->timestamp = get_timestamp_us();
-            interrupt_signal(write_intr);
         }
     }
 
-    if (get_timestamp_us() >= end_time - 100000) {
-        printf("\nBenchmark completed successfully.\n");
-    }
-
-cleanup:
     double cpu_end = get_cpu_usage();
     stats->cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);
     calculate_stats(latencies, latency_count, stats);
@@ -415,8 +405,5 @@ void run_shm_nonblocking_server(NonBlockingRingBuffer* rb, int duration_secs) {
         pthread_mutex_unlock(&rb->mutex);
     }
 
-    if (get_timestamp_us() >= end_time - 100000) {
-        printf("Server shutting down...\n");
-    }
     free(buffer);
 } 

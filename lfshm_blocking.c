@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include <sys/select.h>
 
-#define SHM_NAME "/lfbshm_ring_buffer"
+#define SHM_NAME "/lfshm_blocking_ring_buffer"
 
 // Helper functions for futex operations
 static inline int futex_wait(volatile uint32_t* uaddr, uint32_t val) {

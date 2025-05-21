@@ -11,6 +11,17 @@
 #include <sys/syscall.h>
 #include <linux/futex.h>
 
+#define SHM_NAME "/lfnbshm_ring_buffer"
+
+// Helper functions for futex operations
+static inline int futex_wait(volatile uint32_t* uaddr, uint32_t val) {
+    return syscall(SYS_futex, uaddr, FUTEX_WAIT, val, NULL, NULL, 0);
+}
+
+static inline int futex_wake(volatile uint32_t* uaddr, int count) {
+    return syscall(SYS_futex, uaddr, FUTEX_WAKE, count, NULL, NULL, 0);
+}
+
 /* Setup shared memory with io_uring futex operations */
 LockFreeNonBlockingRingBuffer* setup_lfnbshm(size_t size, bool is_server) {
     int fd = -1;

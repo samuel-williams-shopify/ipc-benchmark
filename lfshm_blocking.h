@@ -1,37 +1,28 @@
-#pragma once
+#ifndef LFSHM_BLOCKING_H
+#define LFSHM_BLOCKING_H
 
-#include "benchmark.h"
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <linux/futex.h>
 #include <sys/syscall.h>
 #include <unistd.h>
-#include <stdatomic.h>
 
-#define SHM_NAME "/lfbshm_ring_buffer"
-
-// Helper functions for futex operations
-static inline int futex_wait(volatile uint32_t* uaddr, uint32_t val) {
-    return syscall(SYS_futex, uaddr, FUTEX_WAIT, val, NULL, NULL, 0);
-}
-
-static inline int futex_wake(volatile uint32_t* uaddr, int count) {
-    return syscall(SYS_futex, uaddr, FUTEX_WAKE, count, NULL, NULL, 0);
-}
-
-struct LockFreeBlockingRingBuffer {
+// Structure for lock-free blocking shared memory ring buffer
+typedef struct {
     char* buffer;
     size_t size;
-    _Atomic size_t read_pos;
-    _Atomic size_t write_pos;
-    _Atomic uint32_t server_futex;
-    _Atomic uint32_t client_futex;
-    _Atomic bool ready;
+    atomic_size_t read_pos;
+    atomic_size_t write_pos;
+    atomic_uint server_futex;
+    atomic_uint client_futex;
+    atomic_bool ready;
     bool is_server;
-};
+} LockFreeBlockingRingBuffer;
 
-typedef struct LockFreeBlockingRingBuffer LockFreeBlockingRingBuffer;
+// Function prototypes
+LockFreeBlockingRingBuffer* setup_lfbshm(size_t size, bool is_server);
+void free_lfbshm(LockFreeBlockingRingBuffer* rb);
+void run_lfbshm_server(LockFreeBlockingRingBuffer* rb, int duration_secs);
+void run_lfbshm_client(LockFreeBlockingRingBuffer* rb, int duration_secs, void* stats);
 
-LockFreeBlockingRingBuffer* setup_lfshm_blocking(size_t size, bool is_server);
-void free_lfshm_blocking(LockFreeBlockingRingBuffer* rb);
-void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs);
-void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats); 
+#endif // LFSHM_BLOCKING_H 

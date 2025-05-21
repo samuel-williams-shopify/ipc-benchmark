@@ -23,7 +23,7 @@ typedef struct {
 
 NonBlockingRingBuffer* setup_shm_nonblocking(size_t size, bool is_server);
 void free_shm_nonblocking(NonBlockingRingBuffer* rb);
-void run_shm_nonblocking_server(NonBlockingRingBuffer* rb, int duration_secs);
+void run_shm_nonblocking_server(NonBlockingRingBuffer* rb, int duration_secs, float work_secs);
 void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats);
 
 #endif // SHM_NONBLOCKING_H 

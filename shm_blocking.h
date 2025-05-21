@@ -22,7 +22,7 @@ typedef struct {
 
 BlockingRingBuffer* setup_shm_blocking(size_t size, bool is_server);
 void free_shm_blocking(BlockingRingBuffer* rb);
-void run_shm_blocking_server(BlockingRingBuffer* rb, int duration_secs);
+void run_shm_blocking_server(BlockingRingBuffer* rb, int duration_secs, float work_secs);
 void run_shm_blocking_client(BlockingRingBuffer* rb, int duration_secs, BenchmarkStats* stats);
 
 #endif // SHM_BLOCKING_H 

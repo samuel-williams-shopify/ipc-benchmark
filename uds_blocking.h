@@ -20,7 +20,7 @@ UDSBlockingState* setup_uds_blocking_client(const char* socket_path);
 void free_uds_blocking(UDSBlockingState* state);
 
 /* Run the Unix Domain Socket server benchmark */
-void run_uds_blocking_server(UDSBlockingState* state, int duration_secs);
+void run_uds_blocking_server(UDSBlockingState* state, int duration_secs, float work_secs);
 
 /* Run the Unix Domain Socket client benchmark */
 void run_uds_blocking_client(UDSBlockingState* state, int duration_secs, BenchmarkStats* stats); 

@@ -189,7 +189,7 @@ static bool ring_buffer_write(LockFreeNonBlockingRingBuffer* rb, const void* dat
 }
 
 /* Run the Lock-free Shared Memory server benchmark */
-void run_lfshm_nonblocking_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs) {
+void run_lfshm_nonblocking_server(LockFreeNonBlockingRingBuffer* rb, int duration_secs, float work_secs) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
@@ -211,6 +211,11 @@ void run_lfshm_nonblocking_server(LockFreeNonBlockingRingBuffer* rb, int duratio
             Message* msg = (Message*)buffer;
             if (!validate_message(msg, msg_size)) {
                 fprintf(stderr, "Server: Message validation failed\n");
+            }
+            
+            // Simulate work if requested
+            if (work_secs > 0.0f) {
+                usleep(work_secs * 1000000);
             }
             
             // Echo the message back

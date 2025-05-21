@@ -39,6 +39,7 @@ void print_usage(const char* prog_name) {
     fprintf(stderr, "  -c, --client           Run as client\n");
     fprintf(stderr, "  -m, --mode MODE        IPC mode (uds-blocking, uds-nonblocking, shm-notification, shm-blocking, lfshm-blocking, lfshm-nonblocking)\n");
     fprintf(stderr, "  -d, --duration SECS    Benchmark duration in seconds\n");
+    fprintf(stderr, "  -w, --work SECS        Server work time in seconds (default: 0)\n");
     fprintf(stderr, "  -h, --help             Show this help message\n");
 }
 
@@ -47,6 +48,7 @@ int main(int argc, char* argv[]) {
     bool is_client = false;
     const char* mode = NULL;
     int duration_secs = RUN_DURATION;
+    float work_secs = 0.0f;
 
     signal(SIGPIPE, SIG_IGN);
 
@@ -55,13 +57,14 @@ int main(int argc, char* argv[]) {
         {"client", no_argument, 0, 'c'},
         {"mode", required_argument, 0, 'm'},
         {"duration", required_argument, 0, 'd'},
+        {"work", required_argument, 0, 'w'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
     int option_index = 0;
-    while ((opt = getopt_long(argc, argv, "scm:d:h", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "scm:d:w:h", long_options, &option_index)) != -1) {
         switch (opt) {
             case 's':
                 is_server = true;
@@ -76,6 +79,13 @@ int main(int argc, char* argv[]) {
                 duration_secs = atoi(optarg);
                 if (duration_secs <= 0) {
                     fprintf(stderr, "Invalid duration\n");
+                    return 1;
+                }
+                break;
+            case 'w':
+                work_secs = atof(optarg);
+                if (work_secs < 0) {
+                    fprintf(stderr, "Invalid work time\n");
                     return 1;
                 }
                 break;
@@ -113,7 +123,7 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "Failed to setup Unix Domain Socket server\n");
                 return 1;
             }
-            run_uds_blocking_server(state, duration_secs);
+            run_uds_blocking_server(state, duration_secs, work_secs);
             free_uds_blocking(state);
         } else {
             UDSBlockingState* state = setup_uds_blocking_client("/tmp/uds_blocking.sock");
@@ -133,7 +143,7 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "Failed to setup Unix Domain Socket server\n");
                 return 1;
             }
-            run_uds_nonblocking_server(state, duration_secs);
+            run_uds_nonblocking_server(state, duration_secs, work_secs);
             free_uds_nonblocking(state);
         } else {
             UDSNonblockingState* state = setup_uds_nonblocking_client("/tmp/uds_nonblocking.sock");
@@ -153,7 +163,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         if (is_server) {
-            run_shm_nonblocking_server(rb, duration_secs);
+            run_shm_nonblocking_server(rb, duration_secs, work_secs);
         } else {
             BenchmarkStats stats = {0};
             run_shm_nonblocking_client(rb, duration_secs, &stats);
@@ -167,7 +177,7 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "Failed to setup Blocking Shared Memory server\n");
                 return 1;
             }
-            run_shm_blocking_server(rb, duration_secs);
+            run_shm_blocking_server(rb, duration_secs, work_secs);
             free_shm_blocking(rb);
         } else {
             BlockingRingBuffer* rb = setup_shm_blocking(BUFFER_SIZE, false);
@@ -188,7 +198,7 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "Failed to setup Lock-free Blocking Shared Memory server\n");
                 return 1;
             }
-            run_lfshm_blocking_server(rb, duration_secs);
+            run_lfshm_blocking_server(rb, duration_secs, work_secs);
             free_lfshm_blocking(rb);
         } else {
             LockFreeBlockingRingBuffer* rb = setup_lfshm_blocking(BUFFER_SIZE, false);
@@ -213,7 +223,7 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "Failed to setup Lock-free Non-Blocking Shared Memory server\n");
                 return 1;
             }
-            run_lfshm_nonblocking_server(rb, duration_secs);
+            run_lfshm_nonblocking_server(rb, duration_secs, work_secs);
             free_lfshm_nonblocking(rb);
         } else {
             LockFreeNonBlockingRingBuffer* rb = setup_lfshm_nonblocking(BUFFER_SIZE, false);
@@ -237,7 +247,7 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "Failed to setup Non-Blocking Shared Memory server\n");
                 return 1;
             }
-            run_shm_nonblocking_server(rb, duration_secs);
+            run_shm_nonblocking_server(rb, duration_secs, work_secs);
             free_shm_nonblocking(rb);
         } else {
             NonBlockingRingBuffer* rb = setup_shm_nonblocking(BUFFER_SIZE, false);

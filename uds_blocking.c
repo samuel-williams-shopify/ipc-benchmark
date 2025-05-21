@@ -99,7 +99,7 @@ void free_uds_blocking(UDSBlockingState* state) {
 }
 
 /* Run the Unix Domain Socket server benchmark */
-void run_uds_blocking_server(UDSBlockingState* state, int duration_secs) {
+void run_uds_blocking_server(UDSBlockingState* state, int duration_secs, float work_secs) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
@@ -132,6 +132,12 @@ void run_uds_blocking_server(UDSBlockingState* state, int duration_secs) {
         if (!validate_message(msg, msg_size)) {
             fprintf(stderr, "Server: Message validation failed\n");
         }
+
+        // Simulate work if requested
+        if (work_secs > 0.0f) {
+            usleep(work_secs * 1000000);
+        }
+
         if (send(client_fd, buffer, msg_size, 0) != (ssize_t)msg_size) {
             perror("send");
             break;

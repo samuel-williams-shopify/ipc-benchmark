@@ -14,10 +14,6 @@
 
 #define SHM_NAME "/shm_nonblocking"
 
-/* Forward declarations */
-static bool ring_buffer_read(NonBlockingRingBuffer* rb, void* data, size_t max_len, size_t* bytes_read);
-static bool ring_buffer_write(NonBlockingRingBuffer* rb, const void* data, size_t len);
-
 /* Thread data structure */
 typedef struct {
     NonBlockingRingBuffer* rb;
@@ -343,7 +339,7 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
     free(latencies);
 }
 
-void run_shm_nonblocking_server(NonBlockingRingBuffer* rb, int duration_secs) {
+void run_shm_nonblocking_server(NonBlockingRingBuffer* rb, int duration_secs, float work_secs) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
@@ -369,6 +365,11 @@ void run_shm_nonblocking_server(NonBlockingRingBuffer* rb, int duration_secs) {
             Message* msg = (Message*)buffer;
             if (!validate_message(msg, msg_size)) {
                 fprintf(stderr, "Server: Message validation failed\n");
+            }
+
+            // Simulate work if requested
+            if (work_secs > 0.0f) {
+                usleep(work_secs * 1000000);
             }
             
             // Echo the message back

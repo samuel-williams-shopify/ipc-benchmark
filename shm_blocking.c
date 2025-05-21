@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <time.h>
 
 #define SHM_NAME "/shm_blocking"
 
@@ -199,7 +200,7 @@ void free_shm_blocking(BlockingRingBuffer* rb) {
     }
 }
 
-void run_shm_blocking_server(BlockingRingBuffer* rb, int duration_secs) {
+void run_shm_blocking_server(BlockingRingBuffer* rb, int duration_secs, float work_secs) {
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
@@ -218,6 +219,11 @@ void run_shm_blocking_server(BlockingRingBuffer* rb, int duration_secs) {
             Message* msg = (Message*)buffer;
             if (!validate_message(msg, msg_size)) {
                 fprintf(stderr, "Server: Message validation failed\n");
+            }
+            
+            // Simulate work if requested
+            if (work_secs > 0.0f) {
+                usleep(work_secs * 1000000);
             }
             
             // Echo the message back

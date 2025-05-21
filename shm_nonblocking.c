@@ -407,7 +407,10 @@ void run_shm_nonblocking_client(NonBlockingRingBuffer* rb, int duration_secs, Be
 void free_shm_nonblocking_server(NonBlockingRingBuffer* rb) {
     if (rb) {
         pthread_mutex_lock(&rb->mutex);
+        
         rb->ready = false;
+        rb->response_available = true;
+
         pthread_cond_signal(&rb->server_cond);
         pthread_cond_signal(&rb->client_cond);
         pthread_mutex_unlock(&rb->mutex);

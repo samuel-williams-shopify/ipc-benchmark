@@ -338,8 +338,10 @@ void free_shm_blocking_server(BlockingRingBuffer* rb) {
     if (rb) {
         // Wake up any waiting clients
         pthread_mutex_lock(&rb->mutex);
-        rb->ready = false;  // Signal shutdown to clients
-        
+
+        rb->ready = false;
+        rb->response_available = true;
+
         pthread_cond_broadcast(&rb->server_cond);
         pthread_cond_broadcast(&rb->client_cond);
         pthread_mutex_unlock(&rb->mutex);

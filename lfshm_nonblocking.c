@@ -43,12 +43,14 @@ LockFreeNonBlockingRingBuffer* setup_lfnbshm(size_t size, bool is_server) {
     }
 
     // Initialize the ring buffer
-    rb->read_pos = 0;
-    rb->write_pos = 0;
+    atomic_store(&rb->read_pos, 0);
+    atomic_store(&rb->write_pos, 0);
+    atomic_store(&rb->message_available, false);
+    atomic_store(&rb->response_available, false);
     rb->size = size;
-    rb->message_available = false;
-    rb->response_available = false;
-    rb->ready = is_server;
+    atomic_store(&rb->ready, is_server);
+    atomic_store(&rb->server_futex, 0);
+    atomic_store(&rb->client_futex, 0);
     rb->is_server = is_server;
 
     close(fd);
@@ -60,13 +62,13 @@ static bool ring_buffer_read(LockFreeNonBlockingRingBuffer* rb, void* data, size
     *bytes_read = 0;
     
     // Check if the buffer is empty
-    if (rb->read_pos == rb->write_pos && !rb->message_available) {
+    if (atomic_load(&rb->read_pos) == atomic_load(&rb->write_pos) && !atomic_load(&rb->message_available)) {
         return false;
     }
     
     // Read the message length first
     uint32_t msg_len;
-    size_t read_pos = rb->read_pos;
+    size_t read_pos = atomic_load(&rb->read_pos);
     
     if (read_pos + sizeof(uint32_t) > rb->size) {
         // Wrap around for the length
@@ -105,8 +107,8 @@ static bool ring_buffer_read(LockFreeNonBlockingRingBuffer* rb, void* data, size
     }
     
     // Update the read position
-    rb->read_pos = read_pos;
-    rb->message_available = false;
+    atomic_store(&rb->read_pos, read_pos);
+    atomic_store(&rb->message_available, false);
     *bytes_read = msg_len;
     
     return true;
@@ -120,13 +122,13 @@ static bool ring_buffer_write(LockFreeNonBlockingRingBuffer* rb, const void* dat
     }
     
     // Wait for space in the buffer
-    while (rb->write_pos == rb->read_pos && rb->message_available) {
+    while (atomic_load(&rb->write_pos) == atomic_load(&rb->read_pos) && atomic_load(&rb->message_available)) {
         // Spin wait
         __builtin_ia32_pause();
     }
     
     // Write the message
-    size_t write_pos = rb->write_pos;
+    size_t write_pos = atomic_load(&rb->write_pos);
     
     // Write the length first
     if (write_pos + sizeof(uint32_t) > rb->size) {
@@ -161,8 +163,8 @@ static bool ring_buffer_write(LockFreeNonBlockingRingBuffer* rb, const void* dat
     }
     
     // Update the write position
-    rb->write_pos = write_pos;
-    rb->message_available = true;
+    atomic_store(&rb->write_pos, write_pos);
+    atomic_store(&rb->message_available, true);
     
     return true;
 }
@@ -303,7 +305,7 @@ void run_lfnbshm_client(LockFreeNonBlockingRingBuffer* rb, int duration_secs, Be
             stats->bytes += msg_size;
         } else {
             // Wait for server to write
-            futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_acquire(&rb->client_futex));
+            futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load(&rb->client_futex));
         }
     }
 

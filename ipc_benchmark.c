@@ -181,7 +181,7 @@ int main(int argc, char* argv[]) {
             free_shm_blocking(rb);
         }
     } else if (strcmp(mode, "lfshm-blocking") == 0) {
-#ifdef HAVE_FUTEX
+#ifdef __linux__
         if (is_server) {
             LockFreeBlockingRingBuffer* rb = setup_lfshm_blocking(BUFFER_SIZE, true);
             if (!rb) {

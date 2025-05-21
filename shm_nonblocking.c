@@ -258,8 +258,6 @@ void run_shm_nonblocking_server(NonBlockingRingBuffer* rb, int duration_secs, fl
             pthread_mutex_unlock(&rb->mutex);
         }
     }
-
-    fprintf(stderr, "Server exiting\n");
     
     free(buffer);
 }
@@ -410,6 +408,8 @@ void free_shm_nonblocking_server(NonBlockingRingBuffer* rb) {
     if (rb) {
         pthread_mutex_lock(&rb->mutex);
         rb->ready = false;
+        pthread_cond_signal(&rb->server_cond);
+        pthread_cond_signal(&rb->client_cond);
         pthread_mutex_unlock(&rb->mutex);
         
         munmap(rb, sizeof(NonBlockingRingBuffer) + rb->size);

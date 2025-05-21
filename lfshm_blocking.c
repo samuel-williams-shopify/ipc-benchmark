@@ -233,8 +233,6 @@ void run_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb, int duration_secs
     
     // Cleanup
     free(buffer);
-    munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
-    shm_unlink(SHM_NAME);
 }
 
 /* Run the Lock-free Shared Memory client benchmark */
@@ -242,14 +240,12 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
     void* buffer = malloc(MAX_MSG_SIZE);
     if (!buffer) {
         perror("malloc");
-        munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
         return;
     }
     uint64_t* latencies = malloc(sizeof(uint64_t) * MAX_LATENCIES);
     if (!latencies) {
         perror("malloc");
         free(buffer);
-        munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
         return;
     }
     size_t latency_count = 0;
@@ -309,14 +305,17 @@ void run_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb, int duration_secs
     
     free(buffer);
     free(latencies);
-    munmap(rb, sizeof(LockFreeBlockingRingBuffer) + BUFFER_SIZE);
 }
 
 void free_lfshm_blocking_server(LockFreeBlockingRingBuffer* rb) {
-    munmap(rb, sizeof(LockFreeBlockingRingBuffer) + rb->size);
-    shm_unlink(SHM_NAME);
+    if (rb) {
+        munmap(rb, sizeof(LockFreeBlockingRingBuffer) + rb->size);
+        shm_unlink(SHM_NAME);
+    }
 }
 
 void free_lfshm_blocking_client(LockFreeBlockingRingBuffer* rb) {
-    munmap(rb, sizeof(LockFreeBlockingRingBuffer) + rb->size);
+    if (rb) {
+        munmap(rb, sizeof(LockFreeBlockingRingBuffer) + rb->size);
+    }
 } 

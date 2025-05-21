@@ -181,17 +181,6 @@ UDSNonblockingState* setup_uds_nonblocking_client(const char* socket_path) {
     return state;
 }
 
-/* Free Unix Domain Socket resources */
-void free_uds_nonblocking(UDSNonblockingState* state) {
-    if (state) {
-        close(state->fd);
-        if (state->is_server) {
-            unlink(SOCKET_PATH);
-        }
-        free(state);
-    }
-}
-
 /* Run the Unix Domain Socket server benchmark */
 void run_uds_nonblocking_server(UDSNonblockingState* state, int duration_secs, float work_secs) {
     void* buffer = malloc(MAX_MSG_SIZE);
@@ -331,4 +320,15 @@ void run_uds_nonblocking_client(UDSNonblockingState* state, int duration_secs, B
     
     free(buffer);
     free(latencies);
-} 
+}
+
+/* Free Unix Domain Socket resources */
+void free_uds_nonblocking(UDSNonblockingState* state) {
+    if (state) {
+        close(state->fd);
+        if (state->is_server) {
+            unlink(SOCKET_PATH);
+        }
+        free(state);
+    }
+}

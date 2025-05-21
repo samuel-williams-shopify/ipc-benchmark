@@ -87,17 +87,6 @@ UDSBlockingState* setup_uds_blocking_client(const char* socket_path) {
     return state;
 }
 
-/* Free Unix Domain Socket resources */
-void free_uds_blocking(UDSBlockingState* state) {
-    if (state) {
-        close(state->fd);
-        if (state->is_server) {
-            unlink(SOCKET_PATH);
-        }
-        free(state);
-    }
-}
-
 /* Run the Unix Domain Socket server benchmark */
 void run_uds_blocking_server(UDSBlockingState* state, int duration_secs, float work_secs) {
     void* buffer = malloc(MAX_MSG_SIZE);
@@ -236,4 +225,15 @@ void run_uds_blocking_client(UDSBlockingState* state, int duration_secs, Benchma
     
     free(buffer);
     free(latencies);
-} 
+}
+
+/* Free Unix Domain Socket resources */
+void free_uds_blocking(UDSBlockingState* state) {
+    if (state) {
+        close(state->fd);
+        if (state->is_server) {
+            unlink(SOCKET_PATH);
+        }
+        free(state);
+    }
+}

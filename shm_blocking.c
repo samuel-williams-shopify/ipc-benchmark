@@ -192,12 +192,19 @@ BlockingRingBuffer* setup_shm_blocking(size_t size, bool is_server) {
 }
 
 void free_shm_blocking_server(BlockingRingBuffer* rb) {
-    munmap(rb, sizeof(BlockingRingBuffer) + rb->size);
-    shm_unlink(SHM_NAME);
+    if (rb) {
+        pthread_mutex_destroy(&rb->mutex);
+        pthread_cond_destroy(&rb->server_cond);
+        pthread_cond_destroy(&rb->client_cond);
+        munmap(rb, sizeof(BlockingRingBuffer) + rb->size);
+        shm_unlink(SHM_NAME);
+    }
 }
 
 void free_shm_blocking_client(BlockingRingBuffer* rb) {
-    munmap(rb, sizeof(BlockingRingBuffer) + rb->size);
+    if (rb) {
+        munmap(rb, sizeof(BlockingRingBuffer) + rb->size);
+    }
 }
 
 void run_shm_blocking_server(BlockingRingBuffer* rb, int duration_secs, float work_secs) {

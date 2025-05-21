@@ -7,7 +7,7 @@ UNAME_S := $(shell uname -s)
 
 # Platform-specific settings
 ifeq ($(UNAME_S),Linux)
-    LDFLAGS := -lpthread -lrt
+    LDFLAGS := -lpthread -lrt -luring
     SRC := ipc_benchmark.c shm_nonblocking.c shm_blocking.c lfshm_blocking.c lfshm_nonblocking.c benchmark.c interrupt.c uds_blocking.c uds_nonblocking.c
 else
     LDFLAGS := -lpthread

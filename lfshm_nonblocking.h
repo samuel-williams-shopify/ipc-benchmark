@@ -23,6 +23,8 @@ typedef struct {
     // Shared fields
     size_t size;
     atomic_bool ready;
+    atomic_bool message_available;
+    atomic_bool response_available;
     char buffer[0];
 } __attribute__((aligned(CACHE_LINE_SIZE))) LockFreeNonBlockingRingBuffer;
 

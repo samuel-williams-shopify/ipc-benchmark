@@ -66,6 +66,8 @@ LockFreeNonBlockingRingBuffer* setup_lfshm_nonblocking(size_t size, bool is_serv
         atomic_store_explicit(&rb->server_futex, 0, memory_order_release);
         atomic_store_explicit(&rb->client_futex, 0, memory_order_release);
         atomic_store_explicit(&rb->ready, true, memory_order_release);
+        atomic_store_explicit(&rb->message_available, false, memory_order_release);
+        atomic_store_explicit(&rb->response_available, false, memory_order_release);
     } else {
         // Client just opens the existing segment
         fd = shm_open(SHM_NAME, O_RDWR, 0666);
@@ -225,6 +227,13 @@ void run_lfshm_nonblocking_server(LockFreeNonBlockingRingBuffer* rb, int duratio
     printf("Server ready to process messages\n");
     
     while (get_timestamp_us() < end_time) {
+        // Check if there's a message available
+        if (!atomic_load_explicit(&rb->message_available, memory_order_acquire)) {
+            // Wait for client to write
+            futex_wait((volatile uint32_t*)&rb->server_futex, atomic_load_explicit(&rb->server_futex, memory_order_acquire));
+            continue;
+        }
+
         // Read message from ring buffer
         size_t msg_size;
         bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
@@ -243,13 +252,14 @@ void run_lfshm_nonblocking_server(LockFreeNonBlockingRingBuffer* rb, int duratio
             // Echo the message back
             if (!ring_buffer_write(rb, buffer, msg_size)) {
                 fprintf(stderr, "Failed to write response to ring buffer\n");
+            } else {
+                // Set response as available and message as not available
+                atomic_store_explicit(&rb->response_available, true, memory_order_release);
+                atomic_store_explicit(&rb->message_available, false, memory_order_release);
+                
+                // Wake up client if it's waiting
+                futex_wake((volatile uint32_t*)&rb->client_futex, 1);
             }
-            
-            // Wake up client if it's waiting
-            futex_wake((volatile uint32_t*)&rb->client_futex, 1);
-        } else {
-            // Wait for client to write
-            futex_wait((volatile uint32_t*)&rb->server_futex, atomic_load_explicit(&rb->server_futex, memory_order_acquire));
         }
     }
     
@@ -300,41 +310,49 @@ void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duratio
             break;
         }
         
-        // Wake up server (we can also use io_uring for this)
+        // Set message as available and response as not available
+        atomic_store_explicit(&rb->message_available, true, memory_order_release);
+        atomic_store_explicit(&rb->response_available, false, memory_order_release);
+        
+        // Wake up server
         futex_wake((volatile uint32_t*)&rb->server_futex, 1);
 
         // Wait for response
         size_t msg_size;
-        bool read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
+        bool read_success = false;
         
         while (!read_success) {
-            // Setup futex wait using io_uring
-            struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
-            if (!sqe) {
-                fprintf(stderr, "Failed to get SQE\n");
-                break;
+            // Check if response is available
+            if (!atomic_load_explicit(&rb->response_available, memory_order_acquire)) {
+                // Setup futex wait using io_uring
+                struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+                if (!sqe) {
+                    fprintf(stderr, "Failed to get SQE\n");
+                    break;
+                }
+
+                uint32_t current_val = atomic_load_explicit(&rb->client_futex, memory_order_acquire);
+                io_uring_prep_futex_wait(sqe, (uint32_t*)&rb->client_futex, current_val, FUTEX_PRIVATE_FLAG, 0, 0);
+
+                // Submit the futex wait request
+                if (io_uring_submit(&ring) < 0) {
+                    fprintf(stderr, "Failed to submit futex wait\n");
+                    break;
+                }
+
+                // Wait for completion
+                struct io_uring_cqe* cqe;
+                if (io_uring_wait_cqe(&ring, &cqe) < 0) {
+                    fprintf(stderr, "Failed to wait for futex completion\n");
+                    break;
+                }
+
+                // Mark the completion as seen
+                io_uring_cqe_seen(&ring, cqe);
+                continue;
             }
-
-            uint32_t current_val = atomic_load_explicit(&rb->client_futex, memory_order_acquire);
-            io_uring_prep_futex_wait(sqe, (uint32_t*)&rb->client_futex, current_val, FUTEX_PRIVATE_FLAG, 0, 0);
-
-            // Submit the futex wait request
-            if (io_uring_submit(&ring) < 0) {
-                fprintf(stderr, "Failed to submit futex wait\n");
-                break;
-            }
-
-            // Wait for completion
-            struct io_uring_cqe* cqe;
-            if (io_uring_wait_cqe(&ring, &cqe) < 0) {
-                fprintf(stderr, "Failed to wait for futex completion\n");
-                break;
-            }
-
-            // Mark the completion as seen
-            io_uring_cqe_seen(&ring, cqe);
-
-            // Retry the read
+            
+            // Try to read the response
             read_success = ring_buffer_read(rb, buffer, MAX_MSG_SIZE, &msg_size);
         }
 

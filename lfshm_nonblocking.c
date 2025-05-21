@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/select.h>
+#include <liburing.h>
 
 #define SHM_NAME "/lfbshm_ring_buffer"
 
@@ -253,6 +254,15 @@ void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duratio
     size_t latency_count = 0;
     double cpu_start = get_cpu_usage();
 
+    // Setup io_uring for futex operations
+    struct io_uring ring;
+    if (io_uring_queue_init(32, &ring, 0) < 0) {
+        perror("io_uring_queue_init");
+        free(buffer);
+        free(latencies);
+        return;
+    }
+
     Message* msg = (Message*)buffer;
     msg->seq = 0;
 
@@ -271,7 +281,7 @@ void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duratio
             break;
         }
         
-        // Wake up server
+        // Wake up server (we can also use io_uring for this)
         futex_wake((volatile uint32_t*)&rb->server_futex, 1);
 
         // Wait for response
@@ -296,14 +306,40 @@ void run_lfshm_nonblocking_client(LockFreeNonBlockingRingBuffer* rb, int duratio
             stats->ops++;
             stats->bytes += msg_size;
         } else {
-            // Wait for server to write
-            futex_wait((volatile uint32_t*)&rb->client_futex, atomic_load_explicit(&rb->client_futex, memory_order_acquire));
+            // Setup futex wait using io_uring
+            struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+            if (!sqe) {
+                fprintf(stderr, "Failed to get SQE\n");
+                break;
+            }
+
+            uint32_t current_val = atomic_load_explicit(&rb->client_futex, memory_order_acquire);
+            io_uring_prep_futex_wait(sqe, (uint32_t*)&rb->client_futex, current_val, 0, 0);
+
+            // Submit the futex wait request
+            if (io_uring_submit(&ring) < 0) {
+                fprintf(stderr, "Failed to submit futex wait\n");
+                break;
+            }
+
+            // Wait for completion
+            struct io_uring_cqe* cqe;
+            if (io_uring_wait_cqe(&ring, &cqe) < 0) {
+                fprintf(stderr, "Failed to wait for futex completion\n");
+                break;
+            }
+
+            // Mark the completion as seen
+            io_uring_cqe_seen(&ring, cqe);
         }
     }
 
     double cpu_end = get_cpu_usage();
     stats->cpu_usage = (cpu_end - cpu_start) / (10000.0 * duration_secs);
     calculate_stats(latencies, latency_count, stats);
+    
+    // Cleanup io_uring
+    io_uring_queue_exit(&ring);
     
     free(buffer);
     free(latencies);

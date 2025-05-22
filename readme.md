@@ -310,20 +310,86 @@ Tests run on a CPU-constrained Linux VPS (limited to ~50% CPU usage) with two di
    - UDS performs surprisingly well (Non-blocking: 21.1K ops/sec)
    - SHM Non-blocking shows higher overhead due to client thread design
    - CPU usage varies significantly (43-62%)
+   - Memory copy operations become the dominant cost factor
 
 2. **With Processing Load (1ms)**:
    - All implementations converge to ~700-880 ops/sec (limited by 1ms work)
    - UDS slightly outperforms in throughput
    - CPU usage drops significantly (1.88-3.89%)
    - Latencies become dominated by processing time (~1.1-1.3ms)
+   - Implementation differences become negligible under realistic workloads
 
 3. **Implementation Trade-offs**:
    - Non-blocking variants don't show significant advantages under load
    - Lock-free design shows benefits in raw performance but diminishes under load
    - **UDS provides good performance with simpler implementation**
    - CPU efficiency varies more in no-load scenario
+   - Memory usage is higher for shared memory implementations due to buffer pre-allocation
+   - Error resilience differs significantly: socket errors tend to be more recoverable than SHM corruption
+
+4. **Integration Challenges**:
+   - A non-blocking implementation is necessary for use within an event loop (e.g. Async).
+   - Shared memory approaches are more complicated to coordinate (`shm_open`/`shm_unlink` and `mmap`/`munmap`).
+   - Shared memory error handling is also more tricky - bugs are more likely to break IPC mechanisms completely.
+   - Lock-free implementations add complexity:
+     - Memory ordering semantics must be carefully managed to prevent race conditions
+     - Correct use of atomic operations is error-prone but critical for data integrity
+     - Cache line alignment significantly impacts performance
+   - Platform-specific challenges:
+     - `futex` operations only available on Linux-based systems
+     - `io_uring` (used in non-blocking LFSHM) requires Linux 5.1+ and specific configuration
+     - Portability decreases as performance optimizations increase
+   - Debugging challenges:
+     - Race conditions in shared memory implementations are difficult to reproduce and diagnose
+     - Subtle timing issues can lead to intermittent failures
+     - Tools like `strace` add overhead that can mask race conditions
+   - Implementation overhead:
+     - Non-blocking variants require more complex state management
+     - Error recovery mechanisms are more sophisticated in high-performance implementations
+     - Documentation and maintenance burden increases with implementation complexity
+   - Cross-language integration:
+     - UDS has standardized interfaces across most programming languages/environments
+     - Shared memory approaches often require bespoke implementations for each language pair
+     - Lock-free implementations may need custom bindings for languages without direct memory control
+     - Language-specific memory models can conflict with required atomicity guarantees
 
 These results suggest that under real-world conditions with processing overhead, the choice of IPC mechanism might matter less than other architectural decisions. The simpler UDS implementation performs competitively while being more portable.
+
+### Use Case Recommendations
+
+Based on the benchmark results and observations, here are specific recommendations for different use cases:
+
+1. **General Purpose Applications**:
+   - **Recommendation**: Unix Domain Sockets (blocking or non-blocking as needed)
+   - **Rationale**: Good balance of performance, portability, and simplicity
+   - **Key benefit**: Well-understood error handling and standard interfaces
+
+2. **High-Throughput Data Processing**:
+   - **Recommendation**: Blocking LFSHM if Linux-specific is acceptable; otherwise Blocking SHM
+   - **Rationale**: Best raw performance for data-intensive operations
+   - **Key benefit**: Reduced overhead for large data transfers
+
+3. **Event-Driven Architectures**:
+   - **Recommendation**: Non-blocking UDS or Non-blocking LFSHM (if Linux-specific is acceptable)
+   - **Rationale**: Better integration with event loops and async frameworks
+   - **Key benefit**: Consistent performance in multi-client scenarios
+
+4. **Cross-Language Communication**:
+   - **Recommendation**: Unix Domain Sockets
+   - **Rationale**: Standard interfaces available in virtually all languages
+   - **Key benefit**: Eliminates need for bespoke bindings per language pair
+
+5. **Embedded or Resource-Constrained Systems**:
+   - **Recommendation**: Blocking SHM
+   - **Rationale**: Lower CPU usage in high-throughput scenarios
+   - **Key benefit**: More predictable memory usage patterns
+
+6. **Mission-Critical Systems**:
+   - **Recommendation**: UDS with appropriate error handling
+   - **Rationale**: More mature error handling and recovery mechanisms
+   - **Key benefit**: Better failure isolation between processes
+
+The performance differences between IPC mechanisms are most significant in edge cases with minimal processing overhead. For typical applications with reasonable processing logic, the simplicity and portability of the implementation should be the primary selection criteria.
 
 ## License
 
